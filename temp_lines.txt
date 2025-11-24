@@ -1,0 +1,578 @@
+1	import * as THREE from "three";
+2	import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+3	import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+4	import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
+5	
+6	const loadingEl = document.getElementById("loading");
+7	
+8	const renderer = new THREE.WebGLRenderer({ antialias: true });
+9	renderer.setPixelRatio(window.devicePixelRatio);
+10	renderer.setSize(window.innerWidth, window.innerHeight);
+11	renderer.outputColorSpace = THREE.SRGBColorSpace;
+12	renderer.toneMapping = THREE.ReinhardToneMapping;
+13	renderer.toneMappingExposure = 1.5;
+14	renderer.shadowMap.enabled = true;
+15	document.body.appendChild(renderer.domElement);
+16	
+17	const scene = new THREE.Scene();
+18	
+19	const camera = new THREE.PerspectiveCamera(
+20	  60,
+21	  window.innerWidth / window.innerHeight,
+22	  0.1,
+23	  1000
+24	);
+25	camera.position.set(12, 8, 16);
+26	
+27	const controls = new OrbitControls(camera, renderer.domElement);
+28	controls.target.set(0, 2, 0);
+29	controls.enableDamping = true;
+30	controls.dampingFactor = 0.07;
+31	controls.update();
+32	
+33	const hemiLight = new THREE.HemisphereLight(0xcfe8ff, 0x32394b, 1.1);
+34	scene.add(hemiLight);
+35	
+36	const textureLoader = new THREE.TextureLoader();
+37	const diffuse = textureLoader.load("Water_Diffuse.jpg", (tex) => {
+38	  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+39	  tex.repeat.set(100, 100);
+40	});
+41	const normal = textureLoader.load("Water_Normal.jpg", (tex) => {
+42	  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+43	  tex.repeat.set(100, 100);
+44	});
+45	
+46	const waveA = {
+47	  amplitude: 80,      // crest height
+48	  sigmaX: 90,         // wide across X (barrel width)
+49	  sigmaZ: 28,         // shorter along travel direction
+50	  speed: 18,
+51	  dir: new THREE.Vector2(0, 1).normalize(), // moves +Z
+52	  center: new THREE.Vector2(0, -600),
+53	  wrapLength: 1200,
+54	};
+55	
+56	const waveB = {
+57	  amplitude: 80,
+58	  sigmaX: 28,         // rotated 90 deg to waveA
+59	  sigmaZ: 90,
+60	  speed: 18,
+61	  dir: new THREE.Vector2(-1, 0).normalize(), // moves -X
+62	  center: new THREE.Vector2(600, 0),
+63	  wrapLength: 1200,
+64	};
+65	
+66	const groundBaseHeight = -0.01;
+67	const groundGeometry = new THREE.PlaneGeometry(1000, 1000, 200, 200);
+68	const groundMaterial = new THREE.MeshStandardMaterial({
+69	  map: diffuse,
+70	  normalMap: normal,
+71	  roughness: 0.5,
+72	  metalness: 0.05,
+73	});
+74	applyGerstnerWaves(groundMaterial);
+75	const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+76	ground.rotation.x = -Math.PI / 2;
+77	ground.position.y = groundBaseHeight;
+78	ground.receiveShadow = true;
+79	scene.add(ground);
+80	
+81	const pmremGenerator = new THREE.PMREMGenerator(renderer);
+82	pmremGenerator.compileEquirectangularShader();
+83	
+84	new RGBELoader().load(
+85	  "HDRI_Sky_16k.hdr",
+86	  (hdr) => {
+87	    const envMap = pmremGenerator.fromEquirectangular(hdr).texture;
+88	    scene.environment = envMap;
+89	    scene.background = envMap;
+90	    hdr.dispose();
+91	    pmremGenerator.dispose();
+92	  },
+93	  undefined,
+94	  (err) => {
+95	    console.error("Failed to load HDR:", err);
+96	  }
+97	);
+98	
+99	const controlModes = { CAR: "car", SPECTATOR: "spectator" };
+100	let controlMode = controlModes.CAR;
+101	
+102	const vehicle = {
+103	  object: null,
+104	  velocity: 0,
+105	  yaw: 0,
+106	  maxSpeed: 32,
+107	  accel: 18,
+108	  brake: 14,
+109	  drag: 4.5,
+110	  steerRate: 1.8,
+111	  vy: 0,
+112	  pitch: 0,
+113	  roll: 0,
+114	  airborne: false,
+115	  driftVel: 0,
+116	  driftScale: 14,
+117	  driftDamp: 6,
+118	  driftMax: 10,
+119	  turboMaxMult: 1.6,
+120	  turboAccelMult: 1.4,
+121	  onWave: false,
+122	};
+123	
+124	const followCamera = {
+125	  distance: 12,
+126	  height: 4,
+127	  lookAhead: 6,
+128	  stiffness: 6,
+129	};
+130	
+131	const gltfLoader = new GLTFLoader();
+132	gltfLoader.setPath("./");
+133	gltfLoader.setCrossOrigin("anonymous");
+134	gltfLoader.load(
+135	  "boat.glb",
+136	  (gltf) => {
+137	    gltf.scene.traverse((obj) => {
+138	      if (obj.isMesh) {
+139	        obj.castShadow = true;
+140	        obj.receiveShadow = true;
+141	      }
+142	    });
+143	    gltf.scene.position.set(0, 0, 0);
+144	    gltf.scene.rotation.y = Math.PI / 2;
+145	    vehicle.object = gltf.scene;
+146	    vehicle.yaw = gltf.scene.rotation.y;
+147	    scene.add(gltf.scene);
+148	    controls.target.copy(gltf.scene.position);
+149	
+150	    loadingEl.textContent = "Car mode (H to toggle)";
+151	  },
+152	  (event) => {
+153	    if (event.total > 0) {
+154	      const pct = ((event.loaded / event.total) * 100).toFixed(0);
+155	      loadingEl.textContent = `Loading boat ${pct}%`;
+156	    } else {
+157	      loadingEl.textContent = "Loading boat...";
+158	    }
+159	  },
+160	  (error) => {
+161	    loadingEl.textContent = "Failed to load boat.glb";
+162	    console.error("GLTF load error", error);
+163	  }
+164	);
+165	
+166	const moveState = {
+167	  forward: false,
+168	  back: false,
+169	  left: false,
+170	  right: false,
+171	  flip: false,
+172	  somersault: false,
+173	  turbo: false,
+174	};
+175	const spectatorSpeed = 12;
+176	const worldUp = new THREE.Vector3(0, 1, 0);
+177	
+178	const cameraDir = new THREE.Vector3();
+179	const strafeDir = new THREE.Vector3();
+180	const moveDelta = new THREE.Vector3();
+181	const tmpForward = new THREE.Vector3();
+182	const camDesired = new THREE.Vector3();
+183	const camLook = new THREE.Vector3();
+184	let lastTime = performance.now();
+185	let shaderTime = 0;
+186	
+187	controls.enabled = controlMode === controlModes.SPECTATOR;
+188	
+189	function setKeyState(code, isDown) {
+190	  switch (code) {
+191	    case "KeyW":
+192	    case "ArrowUp":
+193	      moveState.forward = isDown;
+194	      break;
+195	    case "KeyS":
+196	    case "ArrowDown":
+197	      moveState.back = isDown;
+198	      break;
+199	    case "KeyA":
+200	    case "ArrowLeft":
+201	      moveState.left = isDown;
+202	      break;
+203	    case "KeyD":
+204	    case "ArrowRight":
+205	      moveState.right = isDown;
+206	      break;
+207	    case "KeyR":
+208	      moveState.flip = isDown;
+209	      break;
+210	    case "KeyE":
+211	      moveState.somersault = isDown;
+212	      break;
+213	    case "ShiftLeft":
+214	    case "ShiftRight":
+215	      moveState.turbo = isDown;
+216	      break;
+217	    default:
+218	      break;
+219	  }
+220	}
+221	
+222	function toggleMode() {
+223	  controlMode =
+224	    controlMode === controlModes.CAR ? controlModes.SPECTATOR : controlModes.CAR;
+225	  controls.enabled = controlMode === controlModes.SPECTATOR;
+226	  if (vehicle.object && controlMode === controlModes.SPECTATOR) {
+227	    controls.target.copy(vehicle.object.position);
+228	  }
+229	  loadingEl.textContent =
+230	    controlMode === controlModes.CAR
+231	      ? "Car mode (H to toggle)"
+232	      : "Spectator mode (H to toggle)";
+233	}
+234	
+235	window.addEventListener("keydown", (e) => {
+236	  if (e.code === "KeyH" && !e.repeat) {
+237	    toggleMode();
+238	    return;
+239	  }
+240	  setKeyState(e.code, true);
+241	});
+242	window.addEventListener("keyup", (e) => {
+243	  if (e.code === "KeyH") return;
+244	  setKeyState(e.code, false);
+245	});
+246	
+247	function updateCar(dt) {
+248	  if (!vehicle.object) return;
+249	
+250	  const steerInput = (moveState.left ? 1 : 0) + (moveState.right ? -1 : 0);
+251	  const accelInput = (moveState.forward ? 1 : 0) + (moveState.back ? -1 : 0);
+252	  const maxSpeed = vehicle.maxSpeed * (moveState.turbo ? vehicle.turboMaxMult : 1);
+253	
+254	  if (accelInput !== 0) {
+255	    let accelRate = accelInput > 0 ? vehicle.accel : vehicle.brake;
+256	    if (accelInput > 0 && moveState.turbo) accelRate *= vehicle.turboAccelMult;
+257	    vehicle.velocity += accelInput * accelRate * dt;
+258	  } else {
+259	    const drag = Math.sign(vehicle.velocity) * vehicle.drag * dt;
+260	    if (Math.abs(vehicle.velocity) > Math.abs(drag)) {
+261	      vehicle.velocity -= drag;
+262	    } else {
+263	      vehicle.velocity = 0;
+264	    }
+265	  }
+266	
+267	  vehicle.velocity = THREE.MathUtils.clamp(vehicle.velocity, -maxSpeed * 0.4, maxSpeed);
+268	
+269	  const speedFactor = THREE.MathUtils.clamp(
+270	    Math.abs(vehicle.velocity) / maxSpeed,
+271	    0,
+272	    1
+273	  );
+274	  vehicle.yaw +=
+275	    steerInput * vehicle.steerRate * speedFactor * dt * Math.sign(vehicle.velocity || 1);
+276	
+277	  tmpForward.set(Math.sin(vehicle.yaw), 0, Math.cos(vehicle.yaw));
+278	  strafeDir.crossVectors(tmpForward, worldUp).normalize();
+279	
+280	  const desiredDrift =
+281	    steerInput *
+282	    vehicle.driftScale *
+283	    Math.sign(vehicle.velocity || 1) *
+284	    Math.min(1, Math.abs(vehicle.velocity) / maxSpeed);
+285	  const clampedDrift = THREE.MathUtils.clamp(desiredDrift, -vehicle.driftMax, vehicle.driftMax);
+286	  vehicle.driftVel = THREE.MathUtils.damp(
+287	    vehicle.driftVel,
+288	    clampedDrift,
+289	    vehicle.driftDamp,
+290	    dt
+291	  );
+292	
+293	  vehicle.object.position.addScaledVector(tmpForward, vehicle.velocity * dt);
+294	  vehicle.object.position.addScaledVector(strafeDir, vehicle.driftVel * dt);
+295	
+296	  const wasOnWave = vehicle.onWave;
+297	  vehicle.onWave = false;
+298	
+299	  const groundInfo = getGroundInfo(
+300	    vehicle.object.position.x,
+301	    vehicle.object.position.z
+302	  );
+303	
+304	  const travelSign = vehicle.velocity >= 0 ? 1 : -1;
+305	  const slopeAlongForward =
+306	    groundInfo.gradX * tmpForward.x + groundInfo.gradZ * tmpForward.z;
+307	  const slopeAlongTravel = slopeAlongForward * travelSign;
+308	
+309	  vehicle.vy -= 25 * dt;
+310	  vehicle.object.position.y += vehicle.vy * dt;
+311	
+312	  if (vehicle.object.position.y <= groundInfo.height + 0.0001) {
+313	    const targetY = groundInfo.height;
+314	    vehicle.object.position.y = THREE.MathUtils.damp(
+315	      vehicle.object.position.y,
+316	      targetY,
+317	      14,
+318	      dt
+319	    );
+320	    if (vehicle.airborne) {
+321	      vehicle.roll = 0;
+322	    }
+323	    vehicle.airborne = false;
+324	    vehicle.vy = 0;
+325	    vehicle.onWave = groundInfo.onWave;
+326	
+327	    const targetPitch = Math.atan2(slopeAlongForward, 1);
+328	    vehicle.pitch = THREE.MathUtils.damp(
+329	      vehicle.pitch,
+330	      targetPitch,
+331	      12,
+332	      dt
+333	    );
+334	    vehicle.roll = THREE.MathUtils.damp(vehicle.roll, 0, 10, dt);
+335	
+336	    const uphill = Math.max(0, slopeAlongTravel);
+337	    const slopePenalty = uphill * 30;
+338	    vehicle.velocity = Math.max(0, vehicle.velocity - slopePenalty * dt);
+339	
+340	    if (groundInfo.onWave) {
+341	      const climbLift = Math.max(0, vehicle.velocity) * uphill * 0.6;
+342	      vehicle.vy = Math.max(vehicle.vy, climbLift);
+343	    }
+344	  } else {
+345	    vehicle.airborne = true;
+346	    if (wasOnWave) {
+347	      const launchLift =
+348	        Math.abs(vehicle.velocity) * Math.max(0, slopeAlongTravel) * 0.8;
+349	      vehicle.vy = Math.max(vehicle.vy, launchLift);
+350	    }
+351	    const spinRate = 4 * Math.PI;
+352	    if (moveState.flip) vehicle.roll += spinRate * dt;
+353	    if (moveState.somersault) vehicle.pitch += spinRate * dt;
+354	  }
+355	
+356	  vehicle.object.rotation.set(vehicle.pitch, vehicle.yaw, vehicle.roll);
+357	  controls.target.copy(vehicle.object.position);
+358	}
+359	
+360	function updateFollowCamera(dt) {
+361	  if (!vehicle.object) return;
+362	
+363	  tmpForward.set(Math.sin(vehicle.yaw), 0, Math.cos(vehicle.yaw));
+364	  camDesired.copy(vehicle.object.position);
+365	  camDesired.addScaledVector(tmpForward, -followCamera.distance);
+366	  camDesired.y += followCamera.height;
+367	
+368	  camera.position.lerp(
+369	    camDesired,
+370	    1 - Math.exp(-followCamera.stiffness * dt)
+371	  );
+372	
+373	  camLook.copy(vehicle.object.position);
+374	  camLook.addScaledVector(tmpForward, followCamera.lookAhead);
+375	  camera.lookAt(camLook);
+376	}
+377	
+378	function updateSpectator(dt) {
+379	  camera.getWorldDirection(cameraDir);
+380	  cameraDir.y = 0;
+381	  cameraDir.normalize();
+382	
+383	  strafeDir.crossVectors(cameraDir, worldUp).normalize();
+384	
+385	  moveDelta.set(0, 0, 0);
+386	  if (moveState.forward) moveDelta.add(cameraDir);
+387	  if (moveState.back) moveDelta.sub(cameraDir);
+388	  if (moveState.left) moveDelta.sub(strafeDir);
+389	  if (moveState.right) moveDelta.add(strafeDir);
+390	
+391	  if (moveDelta.lengthSq() > 0) {
+392	    moveDelta.normalize().multiplyScalar(spectatorSpeed * dt);
+393	    camera.position.add(moveDelta);
+394	    controls.target.add(moveDelta);
+395	  }
+396	
+397	  controls.update();
+398	}
+399	
+400	function handleResize() {
+401	  camera.aspect = window.innerWidth / window.innerHeight;
+402	  camera.updateProjectionMatrix();
+403	  renderer.setSize(window.innerWidth, window.innerHeight);
+404	}
+405	window.addEventListener("resize", handleResize);
+406	
+407	function animate() {
+408	  const now = performance.now();
+409	  const dt = Math.min((now - lastTime) / 1000, 0.05);
+410	  lastTime = now;
+411	  shaderTime += dt;
+412	
+413	  updateWave(dt);
+414	  updateGerstnerTime(shaderTime);
+415	
+416	  if (controlMode === controlModes.CAR) {
+417	    updateCar(dt);
+418	    updateFollowCamera(dt);
+419	  } else {
+420	    updateSpectator(dt);
+421	  }
+422	
+423	  renderer.render(scene, camera);
+424	  requestAnimationFrame(animate);
+425	}
+426	
+427	animate();
+428	
+429	function sampleSingleWave(w, x, z) {
+430	  const dx = x - w.center.x;
+431	  const dz = z - w.center.y;
+432	  const sigma2x = w.sigmaX * w.sigmaX;
+433	  const sigma2z = w.sigmaZ * w.sigmaZ;
+434	  const height =
+435	    w.amplitude *
+436	    Math.exp(-(dx * dx) / (2 * sigma2x) - (dz * dz) / (2 * sigma2z));
+437	  const dHdx = (-height * dx) / sigma2x;
+438	  const dHdz = (-height * dz) / sigma2z;
+439	  return { height, dHdx, dHdz };
+440	}
+441	
+442	function sampleWave(x, z) {
+443	  const a = sampleSingleWave(waveA, x, z);
+444	  const b = sampleSingleWave(waveB, x, z);
+445	  return {
+446	    height: a.height + b.height,
+447	    dHdx: a.dHdx + b.dHdx,
+448	    dHdz: a.dHdz + b.dHdz,
+449	  };
+450	}
+451	
+452	function getGroundInfo(x, z) {
+453	  const sample = sampleWave(x, z);
+454	  const normal = new THREE.Vector3(-sample.dHdx, 1, -sample.dHdz).normalize();
+455	  const onWave = sample.height > 0.05;
+456	  return {
+457	    height: groundBaseHeight + sample.height,
+458	    gradX: sample.dHdx,
+459	    gradZ: sample.dHdz,
+460	    normal,
+461	    onWave,
+462	  };
+463	}
+464	
+465	function updateWave(dt) {
+466	  moveWave(waveA, dt);
+467	  moveWave(waveB, dt);
+468	  updateWaveMesh();
+469	}
+470	
+471	function moveWave(w, dt) {
+472	  w.center.addScaledVector(w.dir, w.speed * dt);
+473	  const half = w.wrapLength / 2;
+474	  if (Math.abs(w.dir.x) > Math.abs(w.dir.y)) {
+475	    if (w.center.x > half) w.center.x -= w.wrapLength;
+476	    if (w.center.x < -half) w.center.x += w.wrapLength;
+477	  } else {
+478	    if (w.center.y > half) w.center.y -= w.wrapLength;
+479	    if (w.center.y < -half) w.center.y += w.wrapLength;
+480	  }
+481	}
+482	
+483	function updateWaveMesh() {
+484	  const positions = ground.geometry.attributes.position;
+485	  for (let i = 0; i < positions.count; i++) {
+486	    const x = positions.getX(i);
+487	    const zWorld = -positions.getY(i);
+488	    const h = sampleWave(x, zWorld).height;
+489	    positions.setZ(i, h);
+490	  }
+491	  positions.needsUpdate = true;
+492	  ground.geometry.computeVertexNormals();
+493	}
+494	
+495	function applyGerstnerWaves(material) {
+496	  const waves = [
+497	    { dir: new THREE.Vector2(1, 0), amp: 1.6, len: 120, speed: 1.5, steep: 0.45 },
+498	    { dir: new THREE.Vector2(0.3, 1).normalize(), amp: 1.2, len: 90, speed: 1.7, steep: 0.4 },
+499	    { dir: new THREE.Vector2(-0.8, 0.6).normalize(), amp: 0.9, len: 60, speed: 2.2, steep: 0.35 },
+500	  ];
+501	
+502	  material.userData.gerstner = { waves, uniforms: null };
+503	
+504	  material.onBeforeCompile = (shader) => {
+505	    shader.uniforms.uTime = { value: 0 };
+506	    shader.uniforms.uDir = { value: waves.map((w) => w.dir) };
+507	    shader.uniforms.uWaves = {
+508	      value: waves.map((w) => new THREE.Vector4(w.amp, w.len, w.speed, w.steep)),
+509	    };
+510	    material.userData.gerstner.uniforms = shader.uniforms;
+511	
+512	    shader.vertexShader = shader.vertexShader.replace(
+513	      "#include <common>",
+514	      `
+515	      #include <common>
+516	      uniform float uTime;
+517	      uniform vec2 uDir[3];
+518	      uniform vec4 uWaves[3];
+519	
+520	      void applyGerstner(vec3 pos, out vec3 displaced, out vec3 gNormal) {
+521	        vec3 disp = pos;
+522	        float dHdx = 0.0;
+523	        float dHdy = 0.0;
+524	
+525	        for (int i = 0; i < 3; i++) {
+526	          vec2 dir = normalize(uDir[i]);
+527	          float amp = uWaves[i].x;
+528	          float len = uWaves[i].y;
+529	          float spd = uWaves[i].z;
+530	          float steep = uWaves[i].w;
+531	          float k = 6.28318530718 / len;
+532	          float phase = k * (dir.x * pos.x + dir.y * pos.y) + spd * uTime;
+533	          float s = sin(phase);
+534	          float c = cos(phase);
+535	
+536	          disp.x += dir.x * (steep * amp * c);
+537	          disp.y += dir.y * (steep * amp * c);
+538	          disp.z += amp * s;
+539	
+540	          dHdx += amp * k * c * dir.x;
+541	          dHdy += amp * k * c * dir.y;
+542	        }
+543	
+544	        displaced = disp;
+545	        gNormal = normalize(vec3(-dHdx, -dHdy, 1.0));
+546	      }
+547	      `
+548	    );
+549	
+550	    shader.vertexShader = shader.vertexShader.replace(
+551	      "#include <beginnormal_vertex>",
+552	      `
+553	      vec3 displacedPos;
+554	      vec3 gNormal;
+555	      applyGerstner(vec3(position), displacedPos, gNormal);
+556	      vec3 objectNormal = gNormal;
+557	      `
+558	    );
+559	
+560	    shader.vertexShader = shader.vertexShader.replace(
+561	      "#include <begin_vertex>",
+562	      `
+563	      vec3 displacedPos;
+564	      vec3 gNormal;
+565	      applyGerstner(vec3(position), displacedPos, gNormal);
+566	      vec3 transformed = displacedPos;
+567	      `
+568	    );
+569	  };
+570	}
+571	
+572	function updateGerstnerTime(time) {
+573	  const g = groundMaterial.userData.gerstner;
+574	  if (g && g.uniforms) {
+575	    g.uniforms.uTime.value = time;
+576	  }
+577	}
+578	
