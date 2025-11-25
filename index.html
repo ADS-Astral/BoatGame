@@ -130,12 +130,74 @@
       50% { background: linear-gradient(90deg, #ff6b6b, #f9d423); }
       100% { background: linear-gradient(90deg, #f9d423, #ff6b6b); }
     }
+    #controls-panel {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      max-width: 320px;
+      background: rgba(0,0,0,0.75);
+      color: #e6edf3;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+      font-size: 13px;
+      line-height: 1.4;
+      display: none;
+      z-index: 10;
+    }
+    #controls-panel h3 {
+      margin: 0 0 6px 0;
+      font-size: 14px;
+      color: #7ee787;
+    }
+    #controls-panel ul {
+      margin: 0 0 8px 14px;
+      padding: 0;
+    }
+    #controls-panel li { margin-bottom: 4px; }
+    #touch-controls {
+      position: fixed;
+      bottom: 10px;
+      left: 10px;
+      display: none;
+      gap: 6px;
+      z-index: 9;
+    }
+    #touch-controls button {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.65);
+      color: #e6edf3;
+      font-size: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+      touch-action: none;
+    }
+    #status {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      padding: 8px 12px;
+      background: rgba(0,0,0,0.65);
+      border-radius: 8px;
+      color: #e6edf3;
+      font-size: 13px;
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <div id="hud">Rogue wave: <span class="value">--</span></div>
   <div id="minimap">
     <canvas id="minimap-canvas" width="150" height="150"></canvas>
+  </div>
+  <div id="status">
+    <div id="status-haul">Net: 0.0 t | Total: 0.0 t</div>
+    <div id="status-hint">Press K for controls</div>
   </div>
   <div id="netbar">
     <div class="label">
@@ -147,6 +209,20 @@
     </div>
     <div class="progress"><div class="fill"></div></div>
   </div>
+  <div id="controls-panel">
+    <h3>Controls & Goal</h3>
+    <ul>
+      <li>WASD / arrows: Drive</li>
+      <li>Shift: Turbo</li>
+      <li>H: Toggle camera mode</li>
+      <li>F: Deploy/haul net (early haul keeps size)</li>
+      <li>G: Drop net (detach)</li>
+      <li>Capsize: rogue wave with net, shark/net hit, overload (80t)</li>
+      <li>Goal: Collect haul without capsizing</li>
+    </ul>
+    <div>Press K to show/hide.</div>
+  </div>
+  <div id="touch-controls"></div>
   <script type="importmap">
     {
       "imports": {

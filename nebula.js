@@ -321,6 +321,12 @@ let gameOver = false;
 let sinkTimer = 0;
 let sinkMode = "none"; // none | rogue | overload
 const mixers = [];
+const controlsPanel = document.getElementById("controls-panel");
+const touchControls = document.getElementById("touch-controls");
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+  navigator.userAgent
+);
+const statusHaul = document.getElementById("status-haul");
 const foam = {
   max: 1800,
   threshold: 0,
@@ -356,6 +362,10 @@ foam.samples = Array.from({ length: foam.max }, () => {
   return new THREE.Vector2(x, z);
 });
 
+if (isMobile) {
+  setupTouchControls();
+}
+
 controls.enabled = controlMode === controlModes.SPECTATOR;
 
 function setKeyState(code, isDown) {
@@ -384,11 +394,11 @@ function setKeyState(code, isDown) {
       break;
     case "KeyF":
       moveState.netDeploy = isDown;
-      if (isDown) handleNetAction();
+      if (isDown && !isMobile) handleNetAction();
       break;
     case "KeyG":
       moveState.netDrop = isDown;
-      if (isDown) dropNetToBottom();
+      if (isDown && !isMobile) dropNetToBottom();
       break;
     case "ShiftLeft":
     case "ShiftRight":
@@ -417,7 +427,11 @@ window.addEventListener("keydown", (e) => {
     toggleMode();
     return;
   }
-  if (e.code === "KeyF" && !e.repeat) {
+  if (e.code === "KeyK" && !e.repeat) {
+    toggleControlsPanel();
+    return;
+  }
+  if (e.code === "KeyF" && !e.repeat && !isMobile) {
     handleNetAction();
     return;
   }
@@ -924,8 +938,9 @@ function finishNet() {
   netState.progress = 0;
   if (netState.mesh) netState.mesh.visible = false;
   if (netState.rope) netState.rope.visible = false;
-   if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
+  if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
   setNetbarVisibility(false);
+  updateStatusHaul(0, totalTons);
   if (!gameOver && totalTons >= 80) {
     triggerCapsize("overload");
   }
@@ -1010,6 +1025,79 @@ function updateNetbar(progress) {
   if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
   if (!netBarVisible) setNetbarVisibility(true);
   if (progress >= 1) netBar.classList.add("pulse");
+  updateStatusHaul(tonnes, totalTons);
+}
+
+function toggleControlsPanel() {
+  if (!controlsPanel) return;
+  const visible = controlsPanel.style.display === "block";
+  controlsPanel.style.display = visible ? "none" : "block";
+}
+
+function setupTouchControls() {
+  if (!isMobile || !touchControls) return;
+  touchControls.style.display = "grid";
+  touchControls.style.gridTemplateColumns = "repeat(3, 56px)";
+  touchControls.style.gridTemplateRows = "repeat(2, 56px)";
+  touchControls.style.gap = "6px";
+  const buttons = [
+    { label: "⬆", action: "forward" },
+    { label: "⬅", action: "left" },
+    { label: "➡", action: "right" },
+    { label: "⬇", action: "back" },
+    { label: "⚡", action: "turbo" },
+    { label: "F", action: "net" },
+    { label: "G", action: "drop" },
+    { label: "H", action: "mode" },
+  ];
+  buttons.forEach((btn) => {
+    const el = document.createElement("button");
+    el.textContent = btn.label;
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      handleTouchAction(btn.action, true);
+    });
+    el.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      handleTouchAction(btn.action, false);
+    });
+    el.addEventListener("pointerout", (e) => {
+      e.preventDefault();
+      handleTouchAction(btn.action, false);
+    });
+    touchControls.appendChild(el);
+  });
+}
+
+function handleTouchAction(action, isDown) {
+  switch (action) {
+    case "forward":
+      moveState.forward = isDown;
+      break;
+    case "back":
+      moveState.back = isDown;
+      break;
+    case "left":
+      moveState.left = isDown;
+      break;
+    case "right":
+      moveState.right = isDown;
+      break;
+    case "turbo":
+      moveState.turbo = isDown;
+      break;
+    case "net":
+      if (isDown) handleNetAction();
+      break;
+    case "drop":
+      if (isDown) dropNetToBottom();
+      break;
+    case "mode":
+      if (isDown) toggleMode();
+      break;
+    default:
+      break;
+  }
 }
 
 function renderMinimap() {
@@ -1105,6 +1193,8 @@ function applyGerstnerWaves(material) {
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uMaskCenter = { value: new THREE.Vector2(0, 0) };
     shader.uniforms.uMaskRadius = { value: 18 };
+    shader.uniforms.uMaskCenterBoat = { value: new THREE.Vector2(0, 0) };
+    shader.uniforms.uMaskRadiusBoat = { value: 0 };
     shader.uniforms.uDir = { value: gerstnerWaves.map((w) => w.dir) };
     shader.uniforms.uWaves = {
       value: gerstnerWaves.map((w) => new THREE.Vector4(w.amp, w.len, w.speed, w.steep)),
@@ -1118,6 +1208,8 @@ function applyGerstnerWaves(material) {
       uniform float uTime;
       uniform vec2 uDir[3];
       uniform vec4 uWaves[3];
+      uniform vec2 uMaskCenterBoat;
+      uniform float uMaskRadiusBoat;
       varying vec3 vWorldPos;
 
       void applyGerstner(vec3 pos, out vec3 displaced, out vec3 gNormal) {
@@ -1174,6 +1266,8 @@ function applyGerstnerWaves(material) {
       #include <common>
       uniform vec2 uMaskCenter;
       uniform float uMaskRadius;
+      uniform vec2 uMaskCenterBoat;
+      uniform float uMaskRadiusBoat;
       varying vec3 vWorldPos;
       `
     );
@@ -1183,7 +1277,10 @@ function applyGerstnerWaves(material) {
       `
       {
         float d = length(vWorldPos.xz - uMaskCenter);
-        float alphaMask = mix(0.7, 1.0, smoothstep(uMaskRadius * 0.4, uMaskRadius, d));
+        float alphaMaskShark = mix(0.7, 1.0, smoothstep(uMaskRadius * 0.4, uMaskRadius, d));
+        float db = length(vWorldPos.xz - uMaskCenterBoat);
+        float alphaMaskBoat = mix(0.7, 1.0, smoothstep(uMaskRadiusBoat * 0.4, uMaskRadiusBoat, db));
+        float alphaMask = min(alphaMaskShark, alphaMaskBoat);
         gl_FragColor.a *= alphaMask;
       }
       #include <dithering_fragment>
@@ -1202,10 +1299,20 @@ function updateGerstnerTime(time) {
 function updateWaterMask() {
   const g = groundMaterial.userData.gerstner;
   if (!g || !g.uniforms) return;
-  const center = sharkState.object
+  const centerShark = sharkState.object
     ? new THREE.Vector2(sharkState.object.position.x, sharkState.object.position.z)
     : new THREE.Vector2(0, 0);
-  g.uniforms.uMaskCenter.value.copy(center);
+  g.uniforms.uMaskCenter.value.copy(centerShark);
+
+  if (vehicle.object) {
+    g.uniforms.uMaskCenterBoat.value.set(
+      vehicle.object.position.x,
+      vehicle.object.position.z
+    );
+    g.uniforms.uMaskRadiusBoat.value = 14;
+  } else {
+    g.uniforms.uMaskRadiusBoat.value = 0;
+  }
 }
 
 function checkRogueCapsize() {
@@ -1308,4 +1415,9 @@ function updateFoam(dt, time) {
   }
   foam.geometry.setDrawRange(0, count);
   foam.geometry.attributes.position.needsUpdate = true;
+}
+
+function updateStatusHaul(current, total) {
+  if (!statusHaul) return;
+  statusHaul.textContent = `Net: ${current.toFixed(1)} t | Total: ${total.toFixed(1)} t`;
 }
