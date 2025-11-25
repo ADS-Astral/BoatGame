@@ -323,6 +323,10 @@ let sinkMode = "none"; // none | rogue | overload
 const mixers = [];
 const controlsPanel = document.getElementById("controls-panel");
 const touchControls = document.getElementById("touch-controls");
+const joystick = document.getElementById("joystick");
+const joystickStick = joystick?.querySelector(".stick");
+const btnTurbo = document.getElementById("btn-turbo");
+const btnNet = document.getElementById("btn-net");
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
   navigator.userAgent
 );
@@ -364,6 +368,7 @@ foam.samples = Array.from({ length: foam.max }, () => {
 
 if (isMobile) {
   setupTouchControls();
+  statusHaul && (document.getElementById("status-hint").textContent = "Tap K for controls");
 }
 
 controls.enabled = controlMode === controlModes.SPECTATOR;
@@ -1036,68 +1041,94 @@ function toggleControlsPanel() {
 
 function setupTouchControls() {
   if (!isMobile || !touchControls) return;
-  touchControls.style.display = "grid";
-  touchControls.style.gridTemplateColumns = "repeat(3, 56px)";
-  touchControls.style.gridTemplateRows = "repeat(2, 56px)";
-  touchControls.style.gap = "6px";
-  const buttons = [
-    { label: "⬆", action: "forward" },
-    { label: "⬅", action: "left" },
-    { label: "➡", action: "right" },
-    { label: "⬇", action: "back" },
-    { label: "⚡", action: "turbo" },
-    { label: "F", action: "net" },
-    { label: "G", action: "drop" },
-    { label: "H", action: "mode" },
-  ];
-  buttons.forEach((btn) => {
-    const el = document.createElement("button");
-    el.textContent = btn.label;
-    el.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      handleTouchAction(btn.action, true);
+  touchControls.style.display = "flex";
+
+  // Joystick setup
+  if (joystick && joystickStick) {
+    let joyActive = false;
+    const joyCenter = { x: 0, y: 0 };
+    const radius = 50;
+    const setFromEvent = (e) => {
+      const rect = joystick.getBoundingClientRect();
+      joyCenter.x = rect.left + rect.width / 2;
+      joyCenter.y = rect.top + rect.height / 2;
+      const dx = e.clientX - joyCenter.x;
+      const dy = e.clientY - joyCenter.y;
+      const dist = Math.hypot(dx, dy);
+      const clamped = dist > radius ? radius / dist : 1;
+      const nx = dx * clamped;
+      const ny = dy * clamped;
+      joystickStick.style.transform = `translate(${nx}px, ${ny}px)`;
+      // Map to movement
+      moveState.forward = ny < -10;
+      moveState.back = ny > 10;
+      moveState.left = nx < -10;
+      moveState.right = nx > 10;
+    };
+    const resetJoy = () => {
+      joystickStick.style.transform = "translate(-50%, -50%)";
+      moveState.forward = moveState.back = moveState.left = moveState.right = false;
+    };
+    joystick.addEventListener("pointerdown", (e) => {
+      joyActive = true;
+      joystick.setPointerCapture(e.pointerId);
+      setFromEvent(e);
     });
-    el.addEventListener("pointerup", (e) => {
-      e.preventDefault();
-      handleTouchAction(btn.action, false);
+    joystick.addEventListener("pointermove", (e) => {
+      if (!joyActive) return;
+      setFromEvent(e);
     });
-    el.addEventListener("pointerout", (e) => {
-      e.preventDefault();
-      handleTouchAction(btn.action, false);
+    joystick.addEventListener("pointerup", (e) => {
+      joyActive = false;
+      joystick.releasePointerCapture(e.pointerId);
+      resetJoy();
     });
-    touchControls.appendChild(el);
-  });
+    joystick.addEventListener("pointercancel", () => {
+      joyActive = false;
+      resetJoy();
+    });
+  }
+
+  // Buttons
+  if (btnTurbo) {
+    btnTurbo.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      moveState.turbo = true;
+    });
+    btnTurbo.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      moveState.turbo = false;
+    });
+    btnTurbo.addEventListener("pointerout", (e) => {
+      e.preventDefault();
+      moveState.turbo = false;
+    });
+  }
+
+  if (btnNet) {
+    let lastTap = 0;
+    btnNet.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+    });
+    btnNet.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      const now = performance.now();
+      if (now - lastTap < 400) {
+        dropNetToBottom();
+      } else {
+        handleNetAction();
+      }
+      lastTap = now;
+    });
+  }
+
+  // Hint text for mobile
+  const hint = document.getElementById("status-hint");
+  if (hint) hint.textContent = "Use joystick + buttons";
 }
 
 function handleTouchAction(action, isDown) {
-  switch (action) {
-    case "forward":
-      moveState.forward = isDown;
-      break;
-    case "back":
-      moveState.back = isDown;
-      break;
-    case "left":
-      moveState.left = isDown;
-      break;
-    case "right":
-      moveState.right = isDown;
-      break;
-    case "turbo":
-      moveState.turbo = isDown;
-      break;
-    case "net":
-      if (isDown) handleNetAction();
-      break;
-    case "drop":
-      if (isDown) dropNetToBottom();
-      break;
-    case "mode":
-      if (isDown) toggleMode();
-      break;
-    default:
-      break;
-  }
+  // legacy handler no longer used
 }
 
 function renderMinimap() {
