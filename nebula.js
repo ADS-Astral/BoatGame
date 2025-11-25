@@ -1,4 +1,4 @@
-import * as THREE from "three";
+﻿import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
@@ -43,12 +43,12 @@ const normal = textureLoader.load("Water_Normal.jpg", (tex) => {
   tex.repeat.set(100, 100);
 });
 
-const maxRogueWaves = 2;
+const maxRogueWaves = 3;
 const waveConfig = {
-  ampMin: 60,
+  ampMin: 10,
   ampMax: 80,
-  speedMin: 12,
-  speedMax: 28,
+  speedMin: 18,
+  speedMax: 42,
   sigmaAlong: 35,
   sigmaAcross: 110,
   spawnDistance: 900,
@@ -72,6 +72,16 @@ const gerstnerWaves = [
   { dir: new THREE.Vector2(0.3, 1).normalize(), amp: 1.2, len: 90, speed: 1.7, steep: 0.4 },
   { dir: new THREE.Vector2(-0.8, 0.6).normalize(), amp: 0.9, len: 60, speed: 2.2, steep: 0.35 },
 ];
+const gerstnerMaxAmp = Math.max(...gerstnerWaves.map((w) => w.amp));
+const sharkState = {
+  object: null,
+  mixer: null,
+  action: null,
+  yaw: 0,
+  modelYawOffset: -Math.PI / 2,
+  speed: 8,
+  wanderTimer: 0,
+};
 
 const groundBaseHeight = -0.01;
 const groundSize = 1000;
@@ -81,6 +91,8 @@ const groundMaterial = new THREE.MeshStandardMaterial({
   normalMap: normal,
   roughness: 0.5,
   metalness: 0.05,
+  transparent: true,
+  opacity: 1,
 });
 applyGerstnerWaves(groundMaterial);
 const ground = new THREE.Mesh(groundGeometry, groundMaterial);
@@ -88,6 +100,18 @@ ground.rotation.x = -Math.PI / 2;
 ground.position.y = groundBaseHeight;
 ground.receiveShadow = true;
 scene.add(ground);
+const deepOcean = new THREE.Mesh(
+  new THREE.PlaneGeometry(groundSize * 1.2, groundSize * 1.2),
+  new THREE.MeshStandardMaterial({
+    color: 0x0a1d44,
+    roughness: 0.9,
+    metalness: 0.02,
+  })
+);
+deepOcean.rotation.x = -Math.PI / 2;
+deepOcean.position.y = groundBaseHeight - 6;
+deepOcean.receiveShadow = false;
+scene.add(deepOcean);
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
@@ -135,6 +159,45 @@ const vehicle = {
   surfaceGradZ: 0,
 };
 
+const netState = {
+  anchor: null,
+  active: false,
+  phase: "idle", // idle | drop | fill | rise
+  progress: 0,
+  duration: 7,
+  dropTime: 1.5,
+  riseTime: 1.2,
+  elapsed: 0,
+  maxTons: 12,
+  targetTons: 12,
+  currentTons: 0,
+  mesh: null,
+  rope: null,
+  anchorPos: new THREE.Vector3(),
+  targetPos: new THREE.Vector3(),
+  startPos: new THREE.Vector3(),
+  endPos: new THREE.Vector3(),
+  sizeScale: 1,
+};
+
+const netAssets = {
+  coneGeo: new THREE.ConeGeometry(0.45, 0.9, 14),
+  sphereGeo: new THREE.SphereGeometry(0.6, 16, 12),
+  ropeGeo: new THREE.CylinderGeometry(0.03, 0.03, 1, 6),
+  netMat: new THREE.MeshStandardMaterial({
+    color: 0xf5d487,
+    transparent: true,
+    opacity: 0.9,
+    roughness: 0.4,
+    metalness: 0.05,
+  }),
+  ropeMat: new THREE.MeshStandardMaterial({
+    color: 0xcbd5e1,
+    roughness: 0.8,
+    metalness: 0.05,
+  }),
+};
+
 const followCamera = {
   distance: 12,
   height: 5,
@@ -155,11 +218,20 @@ gltfLoader.load(
       }
     });
     gltf.scene.position.set(0, 0, 0);
+    gltf.scene.scale.setScalar(0.75);
     gltf.scene.rotation.y = Math.PI / 2;
     vehicle.object = gltf.scene;
     vehicle.yaw = gltf.scene.rotation.y;
     scene.add(gltf.scene);
     controls.target.copy(gltf.scene.position);
+    netState.anchor =
+      gltf.scene.getObjectByName("NetAnchor") ||
+      gltf.scene.children.find((c) => c.name && c.name.toLowerCase().includes("netanchor")) ||
+      gltf.scene;
+    if (!netState.anchor || netState.anchor === gltf.scene) {
+      console.warn("NetAnchor not found in boat.glb; defaulting to boat root.");
+    }
+    initNetRig();
 
     loadingEl.textContent = "Car mode (H to toggle)";
   },
@@ -177,6 +249,36 @@ gltfLoader.load(
   }
 );
 
+gltfLoader.load(
+  "shark.glb",
+  (gltf) => {
+    sharkState.object = gltf.scene;
+    sharkState.object.traverse((obj) => {
+      if (obj.isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    sharkState.object.position.set(20, 0, -15);
+    sharkState.object.scale.setScalar(6);
+    sharkState.yaw = 0;
+    sharkState.object.rotation.y = sharkState.yaw + sharkState.modelYawOffset;
+    scene.add(sharkState.object);
+
+    sharkState.mixer = new THREE.AnimationMixer(gltf.scene);
+    mixers.push(sharkState.mixer);
+    if (gltf.animations.length > 0) {
+      sharkState.action = sharkState.mixer.clipAction(
+        gltf.animations.find((a) => a.name.toLowerCase().includes("take")) ||
+          gltf.animations[0]
+      );
+      sharkState.action.play();
+    }
+  },
+  undefined,
+  (err) => console.error("Failed to load shark.glb", err)
+);
+
 const moveState = {
   forward: false,
   back: false,
@@ -185,6 +287,8 @@ const moveState = {
   flip: false,
   somersault: false,
   turbo: false,
+  netDeploy: false,
+  netDrop: false,
 };
 const spectatorSpeed = 12;
 const worldUp = new THREE.Vector3(0, 1, 0);
@@ -195,6 +299,9 @@ const moveDelta = new THREE.Vector3();
 const tmpForward = new THREE.Vector3();
 const camDesired = new THREE.Vector3();
 const camLook = new THREE.Vector3();
+const tmpNetDir = new THREE.Vector3();
+const tmpNetMid = new THREE.Vector3();
+const tmpQuat = new THREE.Quaternion();
 let lastTime = performance.now();
 let shaderTime = 0;
 const boatHeightDamp = 8;
@@ -204,6 +311,50 @@ const hudValue = hudEl?.querySelector(".value");
 const minimapCanvas = document.getElementById("minimap-canvas");
 const minimapCtx = minimapCanvas?.getContext("2d") || null;
 const minimapRange = 800;
+const netBar = document.getElementById("netbar");
+const netBarFill = netBar?.querySelector(".fill");
+const netBarTons = netBar?.querySelector(".tons");
+const netBarTotal = netBar?.querySelector(".total");
+let netBarVisible = false;
+let totalTons = 0;
+let gameOver = false;
+let sinkTimer = 0;
+let sinkMode = "none"; // none | rogue | overload
+const mixers = [];
+const foam = {
+  max: 1800,
+  threshold: 0,
+  positions: null,
+  geometry: null,
+  material: null,
+  points: null,
+  samples: null,
+};
+foam.threshold = Math.max(0.1, waveConfig.ampMax * 0.35);
+foam.positions = new Float32Array(foam.max * 3);
+foam.geometry = new THREE.BufferGeometry();
+foam.geometry.setAttribute(
+  "position",
+  new THREE.BufferAttribute(foam.positions, 3).setUsage(THREE.DynamicDrawUsage)
+);
+foam.geometry.setDrawRange(0, 0);
+foam.material = new THREE.PointsMaterial({
+  color: 0xf4f7fb,
+  size: 1.6,
+  transparent: true,
+  opacity: 0.9,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  sizeAttenuation: true,
+});
+foam.points = new THREE.Points(foam.geometry, foam.material);
+foam.points.renderOrder = 2;
+scene.add(foam.points);
+foam.samples = Array.from({ length: foam.max }, () => {
+  const x = (Math.random() - 0.5) * groundSize;
+  const z = (Math.random() - 0.5) * groundSize;
+  return new THREE.Vector2(x, z);
+});
 
 controls.enabled = controlMode === controlModes.SPECTATOR;
 
@@ -230,6 +381,14 @@ function setKeyState(code, isDown) {
       break;
     case "KeyE":
       moveState.somersault = isDown;
+      break;
+    case "KeyF":
+      moveState.netDeploy = isDown;
+      if (isDown) handleNetAction();
+      break;
+    case "KeyG":
+      moveState.netDrop = isDown;
+      if (isDown) dropNetToBottom();
       break;
     case "ShiftLeft":
     case "ShiftRight":
@@ -258,6 +417,10 @@ window.addEventListener("keydown", (e) => {
     toggleMode();
     return;
   }
+  if (e.code === "KeyF" && !e.repeat) {
+    handleNetAction();
+    return;
+  }
   setKeyState(e.code, true);
 });
 window.addEventListener("keyup", (e) => {
@@ -270,7 +433,14 @@ function updateCar(dt) {
 
   const steerInput = (moveState.left ? 1 : 0) + (moveState.right ? -1 : 0);
   const accelInput = (moveState.forward ? 1 : 0) + (moveState.back ? -1 : 0);
-  const maxSpeed = vehicle.maxSpeed * (moveState.turbo ? vehicle.turboMaxMult : 1);
+  const netLoad = netState.active ? netState.progress : 0;
+  const netSlow = netState.active ? THREE.MathUtils.lerp(1, 0.25, netLoad) : 1;
+  const weightSlow = Math.max(0.5, 1 - totalTons / 120);
+  const maxSpeed =
+    vehicle.maxSpeed *
+    (moveState.turbo ? vehicle.turboMaxMult : 1) *
+    netSlow *
+    weightSlow;
 
   if (accelInput !== 0) {
     let accelRate = accelInput > 0 ? vehicle.accel : vehicle.brake;
@@ -462,8 +632,20 @@ function animate() {
   lastTime = now;
   shaderTime += dt;
 
+  if (gameOver) {
+    updateCapsize(dt);
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+    return;
+  }
+
   updateWave(dt);
+  updateNet(dt);
   updateGerstnerTime(shaderTime);
+  updateShark(dt);
+  mixers.forEach((m) => m.update(dt));
+  updateWaterMask();
+  updateFoam(dt, shaderTime);
 
   if (controlMode === controlModes.CAR) {
     updateCar(dt);
@@ -559,6 +741,7 @@ function updateWave(dt) {
   }
   updateHud();
   updateWaveMesh();
+  checkRogueCapsize();
 }
 
 function moveWave(w, dt) {
@@ -575,11 +758,19 @@ function moveWave(w, dt) {
 
 function updateWaveMesh() {
   const positions = ground.geometry.attributes.position;
+  let foamCount = 0;
   for (let i = 0; i < positions.count; i++) {
     const x = positions.getX(i);
     const zWorld = -positions.getY(i);
     const h = sampleWave(x, zWorld).height;
     positions.setZ(i, h);
+    if (h > foam.threshold && foamCount < foam.max) {
+      const idx = foamCount * 3;
+      foam.positions[idx] = x;
+      foam.positions[idx + 1] = groundBaseHeight + h + 0.15;
+      foam.positions[idx + 2] = zWorld;
+      foamCount++;
+    }
   }
   positions.needsUpdate = true;
   ground.geometry.computeVertexNormals();
@@ -599,6 +790,228 @@ function updateHud() {
   hudEl?.classList.add("pulse");
 }
 
+function initNetRig() {
+  if (netState.mesh) return;
+  netState.mesh = new THREE.Mesh(netAssets.coneGeo, netAssets.netMat.clone());
+  netState.mesh.rotation.x = Math.PI;
+  netState.mesh.visible = false;
+  netState.mesh.castShadow = true;
+  scene.add(netState.mesh);
+
+  netState.rope = new THREE.Mesh(netAssets.ropeGeo, netAssets.ropeMat.clone());
+  netState.rope.visible = false;
+  scene.add(netState.rope);
+}
+
+function handleNetAction() {
+  if (!vehicle.object) return;
+  if (!netState.mesh) initNetRig();
+  if (!netState.active) {
+    startNet();
+  } else if (netState.phase === "fill" || netState.phase === "drop") {
+    startNetRise();
+  }
+}
+
+function dropNetToBottom() {
+  if (!netState.active || !netState.mesh) return;
+  netState.active = false;
+  netState.phase = "idle";
+  netState.progress = 0;
+  netState.currentTons = 0;
+  netState.mesh.visible = true;
+  netState.rope.visible = false;
+  netState.mesh.position.set(
+    netState.mesh.position.x,
+    groundBaseHeight - 20,
+    netState.mesh.position.z
+  );
+  netState.mesh.scale.setScalar(0.6);
+  setNetbarVisibility(false);
+}
+
+function startNet() {
+  const anchorWorld = getNetAnchorPosition();
+  netState.anchorPos.copy(anchorWorld);
+  netState.targetPos.copy(anchorWorld);
+  netState.targetPos.y = groundBaseHeight - 10;
+  netState.progress = 0;
+  netState.targetTons = 9 + Math.random() * 6;
+  netState.maxTons = netState.targetTons;
+  netState.currentTons = 0;
+  netState.duration = 5 + Math.random() * 5;
+  netState.elapsed = 0;
+  netState.phase = "drop";
+  netState.active = true;
+  netState.mesh.geometry = netAssets.coneGeo;
+  netState.mesh.rotation.set(Math.PI, 0, 0);
+  netState.mesh.scale.setScalar(0.6);
+  netState.mesh.position.copy(anchorWorld);
+  netState.mesh.visible = true;
+  netState.rope.visible = true;
+  netState.sizeScale = 0.6;
+  setNetbarVisibility(true);
+  updateNetbar(0);
+}
+
+function startNetRise() {
+  netState.phase = "rise";
+  netState.elapsed = 0;
+  netState.startPos.copy(netState.mesh.position);
+  netState.endPos.copy(getNetAnchorPosition());
+  netState.sizeScale = 0.6 + netState.progress;
+  netState.mesh.geometry = netAssets.sphereGeo;
+  netState.mesh.rotation.set(0, 0, 0);
+  netState.mesh.scale.setScalar(netState.sizeScale);
+  netBar?.classList.remove("pulse");
+}
+
+function updateNet(dt) {
+  if (!netState.active || !netState.mesh) return;
+  const anchorWorld = getNetAnchorPosition();
+  netState.anchorPos.copy(anchorWorld);
+  const boatPos = vehicle.object ? vehicle.object.position : anchorWorld;
+  const waveAtBoat = sampleWave(boatPos.x, boatPos.z).height;
+
+  switch (netState.phase) {
+    case "drop": {
+      netState.elapsed += dt;
+      const t = THREE.MathUtils.clamp(netState.elapsed / netState.dropTime, 0, 1);
+      netState.mesh.position.lerpVectors(netState.anchorPos, netState.targetPos, t);
+      netState.mesh.scale.setScalar(THREE.MathUtils.lerp(0.6, 0.9, t));
+      if (t >= 1) {
+        netState.phase = "fill";
+        netState.elapsed = 0;
+      }
+      break;
+    }
+    case "fill": {
+      netState.elapsed += dt;
+      netState.progress = THREE.MathUtils.clamp(netState.elapsed / netState.duration, 0, 1);
+      const s = 0.6 + netState.progress * 0.9;
+      netState.mesh.scale.setScalar(s);
+      netState.currentTons = netState.targetTons * netState.progress;
+      updateNetbar(netState.progress);
+      if (netState.progress >= 1) {
+        startNetRise();
+      }
+      break;
+    }
+    case "rise": {
+      netState.elapsed += dt;
+      const t = THREE.MathUtils.clamp(netState.elapsed / netState.riseTime, 0, 1);
+      netState.endPos.copy(getNetAnchorPosition());
+      netState.mesh.position.lerpVectors(netState.startPos, netState.endPos, t);
+      netState.mesh.scale.setScalar(0.6 + netState.progress * 1.2);
+      if (t >= 1) {
+        finishNet();
+      }
+      // Removed capsize trigger here; handled in updateWave via crest height check
+      break;
+    }
+    default:
+      break;
+  }
+
+  updateRope(netState.anchorPos, netState.mesh.position);
+}
+
+function finishNet() {
+  netState.active = false;
+  netState.phase = "idle";
+  totalTons += netState.currentTons;
+  netState.currentTons = 0;
+  netState.progress = 0;
+  if (netState.mesh) netState.mesh.visible = false;
+  if (netState.rope) netState.rope.visible = false;
+   if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
+  setNetbarVisibility(false);
+  if (!gameOver && totalTons >= 80) {
+    triggerCapsize("overload");
+  }
+}
+
+function updateRope(anchorPos, netPos) {
+  if (!netState.rope) return;
+  const rope = netState.rope;
+  const dir = tmpNetDir.subVectors(netPos, anchorPos);
+  const dist = dir.length();
+  if (dist < 0.01) {
+    rope.visible = false;
+    return;
+  }
+  rope.visible = true;
+  const mid = tmpNetMid.copy(anchorPos).addScaledVector(dir, 0.5);
+  rope.position.copy(mid);
+  rope.scale.set(1, dist, 1);
+  dir.normalize();
+  tmpQuat.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  rope.setRotationFromQuaternion(tmpQuat);
+}
+
+function triggerCapsize(mode = "rogue") {
+  gameOver = true;
+  sinkMode = mode;
+  sinkTimer = 0;
+  if (loadingEl) {
+    loadingEl.textContent =
+      mode === "overload"
+        ? "Overloaded! Boat sinking..."
+        : "Capsized by rogue wave... restarting";
+  }
+  setNetbarVisibility(false);
+}
+
+function updateCapsize(dt) {
+  if (!vehicle.object) {
+    if (sinkTimer > 2) location.reload();
+    sinkTimer += dt;
+    return;
+  }
+  sinkTimer += dt;
+  vehicle.object.rotation.z += Math.PI * dt * 0.6;
+  vehicle.object.position.y -= 3.5 * dt;
+  camera.position.lerp(
+    vehicle.object.position.clone().add(new THREE.Vector3(8, 6, 8)),
+    1 - Math.exp(-2 * dt)
+  );
+  camera.lookAt(vehicle.object.position);
+  if (sinkTimer >= 3) {
+    location.reload();
+  }
+}
+
+function getNetAnchorPosition() {
+  const out = new THREE.Vector3();
+  if (netState.anchor && netState.anchor.getWorldPosition) {
+    netState.anchor.getWorldPosition(out);
+  } else if (vehicle.object) {
+    out.copy(vehicle.object.position);
+  } else {
+    out.set(0, 0, 0);
+  }
+  return out;
+}
+
+function setNetbarVisibility(show) {
+  if (!netBar) return;
+  netBar.style.display = show ? "block" : "none";
+  netBarVisible = show;
+  if (!show) {
+    netBar.classList.remove("pulse");
+  }
+}
+
+function updateNetbar(progress) {
+  if (!netBar || !netBarFill || !netBarTons) return;
+  netBarFill.style.width = `${(progress * 100).toFixed(1)}%`;
+  const tonnes = progress * netState.maxTons;
+  netBarTons.textContent = `${tonnes.toFixed(1)} t`;
+  if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
+  if (!netBarVisible) setNetbarVisibility(true);
+  if (progress >= 1) netBar.classList.add("pulse");
+}
+
 function renderMinimap() {
   if (!minimapCtx || !vehicle.object) return;
   const ctx = minimapCtx;
@@ -616,6 +1029,24 @@ function renderMinimap() {
 
   ctx.save();
   ctx.translate(halfW, halfH);
+  // grid drift to convey motion under fixed boat
+  const gridStep = 40;
+  const boatPos = vehicle.object.position;
+  const offsetX = (boatPos.x % gridStep) * (radius / minimapRange);
+  const offsetZ = (boatPos.z % gridStep) * (radius / minimapRange);
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  for (let gx = -radius * 2; gx <= radius * 2; gx += gridStep * (radius / minimapRange)) {
+    ctx.beginPath();
+    ctx.moveTo(gx - offsetX, -radius);
+    ctx.lineTo(gx - offsetX, radius);
+    ctx.stroke();
+  }
+  for (let gz = -radius * 2; gz <= radius * 2; gz += gridStep * (radius / minimapRange)) {
+    ctx.beginPath();
+    ctx.moveTo(-radius, gz - offsetZ);
+    ctx.lineTo(radius, gz - offsetZ);
+    ctx.stroke();
+  }
   ctx.strokeStyle = "rgba(255,255,255,0.08)";
   ctx.beginPath();
   ctx.arc(0, 0, radius, 0, Math.PI * 2);
@@ -627,7 +1058,6 @@ function renderMinimap() {
   ctx.fill();
 
   const range = minimapRange;
-  const boatPos = vehicle.object.position;
 
   for (const wv of waves) {
     if (!wv.active) continue;
@@ -638,11 +1068,11 @@ function renderMinimap() {
     const scale = radius / range;
     const px = (dx / (dist || 1)) * capped * scale;
     const pz = (dz / (dist || 1)) * capped * scale;
-    const ampNorm = THREE.MathUtils.clamp(
-      (wv.amplitude - waveConfig.ampMin) / (waveConfig.ampMax - waveConfig.ampMin),
-      0,
-      1
-    );
+  const ampNorm = THREE.MathUtils.clamp(
+    (wv.amplitude - waveConfig.ampMin) / (waveConfig.ampMax - waveConfig.ampMin),
+    0,
+    1
+  );
     ctx.fillStyle = `rgba(255,80,80,${0.5 + ampNorm * 0.5})`;
     ctx.beginPath();
     ctx.arc(px, pz, 5 + ampNorm * 4, 0, Math.PI * 2);
@@ -673,6 +1103,8 @@ function applyGerstnerWaves(material) {
 
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uMaskCenter = { value: new THREE.Vector2(0, 0) };
+    shader.uniforms.uMaskRadius = { value: 18 };
     shader.uniforms.uDir = { value: gerstnerWaves.map((w) => w.dir) };
     shader.uniforms.uWaves = {
       value: gerstnerWaves.map((w) => new THREE.Vector4(w.amp, w.len, w.speed, w.steep)),
@@ -686,6 +1118,7 @@ function applyGerstnerWaves(material) {
       uniform float uTime;
       uniform vec2 uDir[3];
       uniform vec4 uWaves[3];
+      varying vec3 vWorldPos;
 
       void applyGerstner(vec3 pos, out vec3 displaced, out vec3 gNormal) {
         vec3 disp = pos;
@@ -720,25 +1153,159 @@ function applyGerstnerWaves(material) {
       shader.vertexShader = shader.vertexShader.replace(
         "#include <beginnormal_vertex>",
         `
-        vec3 displacedPos;
-        vec3 gNormal;
-        applyGerstner(vec3(position), displacedPos, gNormal);
-        vec3 objectNormal = gNormal;
-        `
-      );
+      vec3 displacedPos;
+      vec3 gNormal;
+      applyGerstner(vec3(position), displacedPos, gNormal);
+      vec3 objectNormal = gNormal;
+      vWorldPos = (modelMatrix * vec4(displacedPos, 1.0)).xyz;
+      `
+    );
 
-      shader.vertexShader = shader.vertexShader.replace(
-        "#include <begin_vertex>",
-        `
-        vec3 transformed = displacedPos;
-        `
-      );
-    };
-  }
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `
+      vec3 transformed = displacedPos;
+      `
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `
+      #include <common>
+      uniform vec2 uMaskCenter;
+      uniform float uMaskRadius;
+      varying vec3 vWorldPos;
+      `
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <dithering_fragment>",
+      `
+      {
+        float d = length(vWorldPos.xz - uMaskCenter);
+        float alphaMask = mix(0.7, 1.0, smoothstep(uMaskRadius * 0.4, uMaskRadius, d));
+        gl_FragColor.a *= alphaMask;
+      }
+      #include <dithering_fragment>
+      `
+    );
+  };
+}
 
 function updateGerstnerTime(time) {
   const g = groundMaterial.userData.gerstner;
   if (g && g.uniforms) {
     g.uniforms.uTime.value = time;
   }
+}
+
+function updateWaterMask() {
+  const g = groundMaterial.userData.gerstner;
+  if (!g || !g.uniforms) return;
+  const center = sharkState.object
+    ? new THREE.Vector2(sharkState.object.position.x, sharkState.object.position.z)
+    : new THREE.Vector2(0, 0);
+  g.uniforms.uMaskCenter.value.copy(center);
+}
+
+function checkRogueCapsize() {
+  if (gameOver || !netState.active || netState.phase === "drop") return;
+  if (!vehicle.object) return;
+  const boatPos = vehicle.object.position;
+  const waveHeight = sampleWave(boatPos.x, boatPos.z).height;
+  if (waveHeight >= waveConfig.ampMax * 0.5) {
+    triggerCapsize("rogue");
+  }
+}
+
+function lerpAngle(a, b, t) {
+  const twoPi = Math.PI * 2;
+  let diff = (b - a) % twoPi;
+  if (diff > Math.PI) diff -= twoPi;
+  if (diff < -Math.PI) diff += twoPi;
+  return a + diff * t;
+}
+
+function updateShark(dt) {
+  if (!sharkState.object) return;
+  const chasing = netState.active && netState.phase !== "idle";
+  sharkState.wanderTimer -= dt;
+  if (!chasing && sharkState.wanderTimer <= 0) {
+    sharkState.wanderTimer = 3 + Math.random() * 3;
+    sharkState.speed = 6 + Math.random() * 6;
+    sharkState.yaw += (Math.random() - 0.5) * Math.PI * 0.6;
+  }
+
+  const limit = groundSize * 0.45;
+  const pos = sharkState.object.position;
+  if (Math.abs(pos.x) > limit || Math.abs(pos.z) > limit) {
+    const angleToCenter = Math.atan2(-pos.x, -pos.z);
+    sharkState.yaw = lerpAngle(sharkState.yaw, angleToCenter, dt * 0.6);
+  } else if (chasing && vehicle.object) {
+    const angleToBoat = Math.atan2(
+      vehicle.object.position.x - pos.x,
+      vehicle.object.position.z - pos.z
+    );
+    sharkState.yaw = lerpAngle(sharkState.yaw, angleToBoat, dt * 2.0);
+    const chaseFactor = netState.progress;
+    const base = 8 + chaseFactor * 10;
+    const dist = pos.distanceTo(vehicle.object.position);
+    const sprint =
+      netState.active && dist < 72
+        ? THREE.MathUtils.lerp(3, 5, Math.random())
+        : 1;
+    sharkState.speed = base * sprint;
+  }
+
+  const forward = tmpForward.set(Math.sin(sharkState.yaw), 0, Math.cos(sharkState.yaw));
+  pos.addScaledVector(forward, sharkState.speed * dt);
+  sharkState.object.rotation.y = sharkState.yaw + sharkState.modelYawOffset;
+
+  // collision with boat
+  if (vehicle.object) {
+    const d = pos.distanceTo(vehicle.object.position);
+    if (d < 3.0) {
+      vehicle.velocity = 0;
+      if (netState.active && !gameOver) triggerCapsize("rogue");
+    }
+  }
+
+  // collision with net or rope segment
+  if (netState.active && netState.mesh && netState.mesh.visible && !gameOver) {
+    const a = netState.anchorPos;
+    const b = netState.mesh.position;
+    const seg = tmpNetMid.subVectors(b, a);
+    const lenSq = seg.lengthSq();
+    let distSeg = Infinity;
+    if (lenSq > 0) {
+      const t = THREE.MathUtils.clamp(
+        tmpForward.subVectors(pos, a).dot(seg) / lenSq,
+        0,
+        1
+      );
+      const closest = tmpForward.copy(a).addScaledVector(seg, t);
+      distSeg = pos.distanceTo(closest);
+    }
+    const distNet = pos.distanceTo(b);
+    if (Math.min(distSeg, distNet) < 3.0) {
+      triggerCapsize("rogue");
+    }
+  }
+}
+
+function updateFoam(dt, time) {
+  if (!foam.geometry || !foam.positions || !foam.samples) return;
+  let count = 0;
+  for (let i = 0; i < foam.samples.length && count < foam.max; i++) {
+    const sample = foam.samples[i];
+    const g = sampleGerstner(sample.x, sample.y, time);
+    if (Math.abs(g.height) < foam.threshold) continue;
+    const idx = count * 3;
+    foam.positions[idx] = sample.x;
+    foam.positions[idx + 1] = groundBaseHeight + g.height + 0.05;
+    foam.positions[idx + 2] = sample.y;
+    count++;
+  }
+  foam.geometry.setDrawRange(0, count);
+  foam.geometry.attributes.position.needsUpdate = true;
 }

@@ -74,12 +74,78 @@
       height: 100%;
       display: block;
     }
+    #netbar {
+      position: fixed;
+      left: 50%;
+      bottom: 12px;
+      transform: translateX(-50%);
+      width: min(540px, 90vw);
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.6);
+      border-radius: 10px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(255,255,255,0.08);
+      display: none;
+      box-sizing: border-box;
+    }
+    #netbar .label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: #d0d8e1;
+    }
+    #netbar .tons {
+      color: #7ee787;
+      font-weight: 600;
+    }
+    #netbar .total {
+      color: #9ab9ff;
+      font-weight: 600;
+      margin-left: 8px;
+      font-size: 12px;
+    }
+    #netbar .progress {
+      width: 100%;
+      height: 12px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+    }
+    #netbar .fill {
+      position: absolute;
+      inset: 0;
+      width: 0%;
+      background: linear-gradient(90deg, #2dd4bf, #22d3ee);
+      transition: width 0.1s ease-out;
+    }
+    #netbar.pulse .fill {
+      animation: netPulse 0.8s ease-in-out infinite;
+    }
+    @keyframes netPulse {
+      0% { background: linear-gradient(90deg, #f9d423, #ff6b6b); }
+      50% { background: linear-gradient(90deg, #ff6b6b, #f9d423); }
+      100% { background: linear-gradient(90deg, #f9d423, #ff6b6b); }
+    }
   </style>
 </head>
 <body>
   <div id="hud">Rogue wave: <span class="value">--</span></div>
   <div id="minimap">
     <canvas id="minimap-canvas" width="150" height="150"></canvas>
+  </div>
+  <div id="netbar">
+    <div class="label">
+      <div>
+        <span>Net filling</span>
+        <span class="total">(0.0 t total)</span>
+      </div>
+      <span class="tons">0.0 t</span>
+    </div>
+    <div class="progress"><div class="fill"></div></div>
   </div>
   <script type="importmap">
     {
