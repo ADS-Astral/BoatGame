@@ -23,6 +23,19 @@ const camera = new THREE.PerspectiveCamera(
   1000
 );
 camera.position.set(12, 8, 16);
+const listener = new THREE.AudioListener();
+camera.add(listener);
+const audioLoader = new THREE.AudioLoader();
+const bgSound = new THREE.Audio(listener);
+const openingSound = new THREE.Audio(listener);
+let openingPlayed = false;
+let openingFinished = false;
+const alarmSound = new THREE.Audio(listener);
+const haulSounds = {
+  success: new THREE.Audio(listener),
+  oceanPerch: new THREE.Audio(listener),
+  wrong: new THREE.Audio(listener),
+};
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 2, 0);
@@ -42,6 +55,7 @@ const normal = textureLoader.load("Water_Normal.jpg", (tex) => {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(100, 100);
 });
+const calmMaterials = [];
 
 const maxRogueWaves = 3;
 const waveConfig = {
@@ -73,6 +87,7 @@ const gerstnerWaves = [
   { dir: new THREE.Vector2(-0.8, 0.6).normalize(), amp: 0.9, len: 60, speed: 2.2, steep: 0.35 },
 ];
 const gerstnerMaxAmp = Math.max(...gerstnerWaves.map((w) => w.amp));
+const mothershipState = { object: null, yaw: 0, smoothY: 0 };
 const sharkState = {
   object: null,
   mixer: null,
@@ -81,10 +96,13 @@ const sharkState = {
   modelYawOffset: -Math.PI / 2,
   speed: 8,
   wanderTimer: 0,
+  sprinting: false,
 };
+const sharkNetChaseRadius = 220;
+const sharkSprintSpeed = 18;
 
 const groundBaseHeight = -0.01;
-const groundSize = 1000;
+const groundSize = 2000;
 const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize, 200, 200);
 const groundMaterial = new THREE.MeshStandardMaterial({
   map: diffuse,
@@ -100,18 +118,31 @@ ground.rotation.x = -Math.PI / 2;
 ground.position.y = groundBaseHeight;
 ground.receiveShadow = true;
 scene.add(ground);
-const deepOcean = new THREE.Mesh(
-  new THREE.PlaneGeometry(groundSize * 1.2, groundSize * 1.2),
-  new THREE.MeshStandardMaterial({
-    color: 0x0a1d44,
-    roughness: 0.9,
-    metalness: 0.02,
-  })
-);
-deepOcean.rotation.x = -Math.PI / 2;
-deepOcean.position.y = groundBaseHeight - 6;
-deepOcean.receiveShadow = false;
-scene.add(deepOcean);
+// surround center with calm wave tiles
+const calmGeometry = new THREE.PlaneGeometry(groundSize, groundSize, 100, 100);
+function makeCalmMaterial() {
+  const m = new THREE.MeshStandardMaterial({
+    map: diffuse,
+    normalMap: normal,
+    roughness: 0.5,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 1,
+  });
+  applyCalmWaves(m);
+  calmMaterials.push(m);
+  return m;
+}
+for (let ix = -1; ix <= 1; ix++) {
+  for (let iz = -1; iz <= 1; iz++) {
+    if (ix === 0 && iz === 0) continue;
+    const calmMesh = new THREE.Mesh(calmGeometry, makeCalmMaterial());
+    calmMesh.rotation.x = -Math.PI / 2;
+    calmMesh.position.set(ix * groundSize, groundBaseHeight, iz * groundSize);
+    calmMesh.receiveShadow = true;
+    scene.add(calmMesh);
+  }
+}
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
@@ -129,6 +160,86 @@ new RGBELoader().load(
   (err) => {
     console.error("Failed to load HDR:", err);
   }
+);
+
+// load ambient wind
+audioLoader.load(
+  "wind_BG_Sound.mp3",
+  (buffer) => {
+    bgSound.setBuffer(buffer);
+    bgSound.setLoop(true);
+    bgSound.setVolume(0.4);
+    bgSound.play();
+  },
+  undefined,
+  (err) => console.warn("Failed to load wind_BG_Sound.mp3", err)
+);
+// load opening message (play after 5s)
+audioLoader.load(
+  "Opening_Message.mp3",
+  (buffer) => {
+    openingSound.setBuffer(buffer);
+    openingSound.setLoop(false);
+    openingSound.setVolume(0.7);
+    const durationMs = (buffer.duration || 0) * 1000;
+    setTimeout(() => {
+      if (!gameOver && !openingPlayed) {
+        openingPlayed = true;
+        openingSound.play();
+        if (openingSound.source) {
+          openingSound.source.onended = () => markOpeningFinished();
+        }
+        if (durationMs > 0) {
+          setTimeout(() => markOpeningFinished(), durationMs + 100);
+        }
+      } else if (!openingFinished) {
+        markOpeningFinished();
+      }
+    }, 5000);
+  },
+  undefined,
+  (err) => {
+    console.warn("Failed to load Opening_Message.mp3", err);
+    markOpeningFinished();
+  }
+);
+audioLoader.load(
+  "completehaul100.mp3",
+  (buffer) => {
+    haulSounds.success.setBuffer(buffer);
+    haulSounds.success.setLoop(false);
+  },
+  undefined,
+  (err) => console.warn("Failed to load completehaul100.mp3", err)
+);
+audioLoader.load(
+  "completehaulOP.mp3",
+  (buffer) => {
+    haulSounds.oceanPerch.setBuffer(buffer);
+    haulSounds.oceanPerch.setLoop(false);
+  },
+  undefined,
+  (err) => console.warn("Failed to load completehaulOP.mp3", err)
+);
+audioLoader.load(
+  "completehaulwrong.mp3",
+  (buffer) => {
+    haulSounds.wrong.setBuffer(buffer);
+    haulSounds.wrong.setLoop(false);
+  },
+  undefined,
+  (err) => console.warn("Failed to load completehaulwrong.mp3", err)
+);
+audioLoader.load(
+  "alarm1.mp3",
+  (buffer) => {
+    alarmSound.setBuffer(buffer);
+    alarmSound.setLoop(true);
+    alarmSound.setVolume(0);
+    alarmSound.play();
+  },
+  undefined,
+  (err) => console.warn("Failed to load alarm1.mp3", err)
 );
 
 const controlModes = { CAR: "car", SPECTATOR: "spectator" };
@@ -178,6 +289,7 @@ const netState = {
   startPos: new THREE.Vector3(),
   endPos: new THREE.Vector3(),
   sizeScale: 1,
+  catchSpecies: null,
 };
 
 const netAssets = {
@@ -250,6 +362,30 @@ gltfLoader.load(
 );
 
 gltfLoader.load(
+  "mothership.glb",
+  (gltf) => {
+    mothershipState.object = gltf.scene;
+    mothershipState.object.scale.setScalar(100);
+    mothershipState.object.traverse((obj) => {
+      if (obj.isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    const pos = randomEdgePosition();
+    mothershipState.object.position.copy(pos);
+    mothershipState.yaw = Math.random() * Math.PI * 2;
+    mothershipState.object.rotation.y = mothershipState.yaw;
+    scene.add(mothershipState.object);
+    const h = groundBaseHeight + sampleWave(pos.x, pos.z).height + sampleGerstner(pos.x, pos.z, 0).height;
+    mothershipState.object.position.y = h;
+    mothershipState.smoothY = h;
+  },
+  undefined,
+  (err) => console.error("Failed to load mothership.glb", err)
+);
+
+gltfLoader.load(
   "shark.glb",
   (gltf) => {
     sharkState.object = gltf.scene;
@@ -315,6 +451,214 @@ const netBar = document.getElementById("netbar");
 const netBarFill = netBar?.querySelector(".fill");
 const netBarTons = netBar?.querySelector(".tons");
 const netBarTotal = netBar?.querySelector(".total");
+const fishDisplay = document.createElement("div");
+const sectionOverlay = document.createElement("div");
+fishDisplay.id = "fish-display";
+Object.assign(fishDisplay.style, {
+  position: "fixed",
+  top: "12px",
+  right: "12px",
+  width: "100px",
+  height: "100px",
+  background: "rgba(0,0,0,0.55)",
+  borderRadius: "12px",
+  overflow: "hidden",
+  border: "1px solid rgba(255,255,255,0.12)",
+  boxShadow: "0 8px 28px rgba(0,0,0,0.35)",
+  display: "none",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "6px",
+  boxSizing: "border-box",
+  pointerEvents: "none",
+});
+Object.assign(sectionOverlay.style, {
+  position: "fixed",
+  top: "12px",
+  left: "12px",
+  padding: "8px 12px",
+  background: "rgba(0,0,0,0.65)",
+  borderRadius: "10px",
+  color: "#e6edf3",
+  fontSize: "13px",
+  border: "1px solid rgba(255,255,255,0.1)",
+  boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+  pointerEvents: "none",
+});
+const fishImg = document.createElement("img");
+fishImg.style.width = "100%";
+fishImg.style.height = "100%";
+fishImg.style.objectFit = "contain";
+fishDisplay.appendChild(fishImg);
+document.body.appendChild(fishDisplay);
+document.body.appendChild(sectionOverlay);
+const fishSpecies = [
+  { name: "Shrimp", image: "ShrimpImage.png", sound: "Shrimp.mp3" },
+  { name: "Tuna", image: "TunaImage.png", sound: "Tuna.mp3" },
+  { name: "Ocean Perch", image: "OceanPerchImage.png", sound: "Snapper.mp3" },
+  { name: "Mackerel", image: "MackerelImage.png", sound: "Mackerel.mp3" },
+  { name: "Salmon", image: "SalmonImage.png", sound: "Salmon.mp3" },
+  { name: "Snapper", image: "SnapperImage.png", sound: "Snapper.mp3" },
+];
+const fishAudioBuffers = new Map();
+const speciesTotals = Object.fromEntries(fishSpecies.map((f) => [f.name, 0]));
+const cargoTotals = Object.fromEntries(fishSpecies.map((f) => [f.name, 0]));
+let cashTotal = 0;
+const gridDivisions = 4;
+const fishGrid = Array(gridDivisions * gridDivisions).fill(null);
+let activeFishSound = null;
+let pendingFish = null;
+let targetFish = null;
+const mothershipDockRange = 25;
+function selectRandomFish() {
+  const idx = Math.floor(Math.random() * fishSpecies.length);
+  return fishSpecies[idx];
+}
+function showFishCatch(fish) {
+  if (!fish) return;
+  fishImg.src = fish.image;
+  fishImg.alt = fish.name;
+  fishDisplay.style.display = "flex";
+  playFishSound(fish);
+}
+function hideFishCatch() {
+  fishDisplay.style.display = "none";
+}
+function queueFishReveal(fish) {
+  pendingFish = fish || null;
+  tryShowPendingFish();
+}
+function tryShowPendingFish() {
+  if (!openingFinished || !pendingFish) return;
+  showFishCatch(pendingFish);
+  pendingFish = null;
+}
+function playFishSound(fish) {
+  const key = fish.sound;
+  const buffer = fishAudioBuffers.get(key);
+  const playBuffer = (buf) => {
+    if (activeFishSound && activeFishSound.isPlaying) {
+      activeFishSound.stop();
+    }
+    const fishSound = new THREE.Audio(listener);
+    fishSound.setBuffer(buf);
+    fishSound.setVolume(0.7);
+    fishSound.setLoop(false);
+    fishSound.onEnded = () => {
+      if (activeFishSound === fishSound) activeFishSound = null;
+    };
+    fishSound.play();
+    activeFishSound = fishSound;
+  };
+  if (buffer) {
+    playBuffer(buffer);
+    return;
+  }
+  audioLoader.load(
+    key,
+    (buf) => {
+      fishAudioBuffers.set(key, buf);
+      playBuffer(buf);
+    },
+    undefined,
+  (err) => console.warn(`Failed to load fish sound ${key}`, err)
+  );
+}
+function resetCargoTotals() {
+  Object.keys(cargoTotals).forEach((k) => (cargoTotals[k] = 0));
+}
+function getCargoWeight() {
+  return Object.values(cargoTotals).reduce((a, b) => a + b, 0);
+}
+function playHaulComplete(kind, onEnd) {
+  const snd = haulSounds[kind];
+  if (!snd || !snd.buffer) {
+    onEnd && onEnd();
+    return;
+  }
+  if (snd.isPlaying) snd.stop();
+  snd.setLoop(false);
+  snd.setVolume(1);
+  snd.play();
+  const source = snd.source;
+  if (source) {
+    source.onended = () => onEnd && onEnd();
+  } else if (snd.buffer) {
+    setTimeout(() => onEnd && onEnd(), (snd.buffer.duration || 0) * 1000 + 100);
+  } else {
+    onEnd && onEnd();
+  }
+}
+function computePayout() {
+  let payout = 0;
+  const targetName = targetFish?.name || null;
+  for (const [name, tons] of Object.entries(cargoTotals)) {
+    if (!tons) continue;
+    let rate = 1.2;
+    if (targetName && name === targetName) {
+      rate = 6;
+    } else if (
+      targetName &&
+      ((targetName === "Snapper" && name === "Ocean Perch") ||
+        (targetName === "Ocean Perch" && name === "Snapper"))
+    ) {
+      rate = 3.5;
+    }
+    payout += rate * tons;
+  }
+  return payout;
+}
+function initFishGrid() {
+  const choices = [...fishSpecies, null]; // null means no fish
+  let hasFish = false;
+  while (!hasFish) {
+    for (let i = 0; i < fishGrid.length; i++) {
+      const pick = choices[Math.floor(Math.random() * choices.length)];
+      fishGrid[i] = pick;
+    }
+    hasFish = fishGrid.some((f) => f);
+  }
+}
+function getSectionIndex(x, z) {
+  const half = groundSize * 0.5;
+  if (Math.abs(x) > half || Math.abs(z) > half) return null;
+  const cell = groundSize / gridDivisions;
+  const ix = THREE.MathUtils.clamp(Math.floor((x + half) / cell), 0, gridDivisions - 1);
+  const iz = THREE.MathUtils.clamp(Math.floor((z + half) / cell), 0, gridDivisions - 1);
+  return iz * gridDivisions + ix;
+}
+function getFishForPosition(x, z) {
+  const idx = getSectionIndex(x, z);
+  if (idx === null) return null;
+  return fishGrid[idx];
+}
+function refreshSectionOverlay() {
+  const pos = vehicle.object ? vehicle.object.position : camera.position;
+  const idx = getSectionIndex(pos.x, pos.z);
+  const cargo = getCargoWeight();
+  if (idx === null) {
+    sectionOverlay.textContent = `Target: ${targetFish ? targetFish.name : "--"} | Outside fishing area | Cargo: ${cargo.toFixed(1)} t | Cash: $${cashTotal.toFixed(2)}`;
+    return;
+  }
+  const fish = fishGrid[idx];
+  const row = Math.floor(idx / gridDivisions) + 1;
+  const col = (idx % gridDivisions) + 1;
+  const caught = fish && speciesTotals[fish.name] ? speciesTotals[fish.name] : 0;
+  sectionOverlay.textContent = `Target: ${targetFish ? targetFish.name : "--"} | Zone ${row}-${col}: ${fish ? fish.name : "No fish"}${fish ? ` | Caught: ${caught.toFixed(1)} t` : ""} | Cargo: ${cargo.toFixed(1)} t | Cash: $${cashTotal.toFixed(2)}`;
+}
+function pickTargetFishFromGrid() {
+  const available = fishGrid.filter((f) => f);
+  if (available.length === 0) return selectRandomFish();
+  return available[Math.floor(Math.random() * available.length)];
+}
+function setNewTargetFish() {
+  targetFish = pickTargetFishFromGrid();
+  queueFishReveal(targetFish);
+  refreshSectionOverlay();
+}
+initFishGrid();
+setNewTargetFish();
+refreshSectionOverlay();
 let netBarVisible = false;
 let totalTons = 0;
 let gameOver = false;
@@ -331,44 +675,9 @@ const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/
   navigator.userAgent
 );
 const statusHaul = document.getElementById("status-haul");
-const foam = {
-  max: 1800,
-  threshold: 0,
-  positions: null,
-  geometry: null,
-  material: null,
-  points: null,
-  samples: null,
-};
-foam.threshold = Math.max(0.1, waveConfig.ampMax * 0.35);
-foam.positions = new Float32Array(foam.max * 3);
-foam.geometry = new THREE.BufferGeometry();
-foam.geometry.setAttribute(
-  "position",
-  new THREE.BufferAttribute(foam.positions, 3).setUsage(THREE.DynamicDrawUsage)
-);
-foam.geometry.setDrawRange(0, 0);
-foam.material = new THREE.PointsMaterial({
-  color: 0xf4f7fb,
-  size: 1.6,
-  transparent: true,
-  opacity: 0.9,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
-  sizeAttenuation: true,
-});
-foam.points = new THREE.Points(foam.geometry, foam.material);
-foam.points.renderOrder = 2;
-scene.add(foam.points);
-foam.samples = Array.from({ length: foam.max }, () => {
-  const x = (Math.random() - 0.5) * groundSize;
-  const z = (Math.random() - 0.5) * groundSize;
-  return new THREE.Vector2(x, z);
-});
-
 if (isMobile) {
   setupTouchControls();
-  statusHaul && (document.getElementById("status-hint").textContent = "Tap K for controls");
+  statusHaul && (document.getElementById("status-hint").textContent = "Use joystick + buttons");
 }
 
 controls.enabled = controlMode === controlModes.SPECTATOR;
@@ -404,6 +713,9 @@ function setKeyState(code, isDown) {
     case "KeyG":
       moveState.netDrop = isDown;
       if (isDown && !isMobile) dropNetToBottom();
+      break;
+    case "KeyL":
+      if (isDown && !isMobile) unloadAtMothership();
       break;
     case "ShiftLeft":
     case "ShiftRight":
@@ -661,10 +973,12 @@ function animate() {
   updateWave(dt);
   updateNet(dt);
   updateGerstnerTime(shaderTime);
+  updateCalmTime(shaderTime);
   updateShark(dt);
+  updateSharkAlarm();
+  updateMothership(dt);
   mixers.forEach((m) => m.update(dt));
   updateWaterMask();
-  updateFoam(dt, shaderTime);
 
   if (controlMode === controlModes.CAR) {
     updateCar(dt);
@@ -673,6 +987,7 @@ function animate() {
     updateSpectator(dt);
   }
 
+  refreshSectionOverlay();
   renderer.render(scene, camera);
   renderMinimap();
   requestAnimationFrame(animate);
@@ -777,19 +1092,11 @@ function moveWave(w, dt) {
 
 function updateWaveMesh() {
   const positions = ground.geometry.attributes.position;
-  let foamCount = 0;
   for (let i = 0; i < positions.count; i++) {
     const x = positions.getX(i);
     const zWorld = -positions.getY(i);
     const h = sampleWave(x, zWorld).height;
     positions.setZ(i, h);
-    if (h > foam.threshold && foamCount < foam.max) {
-      const idx = foamCount * 3;
-      foam.positions[idx] = x;
-      foam.positions[idx + 1] = groundBaseHeight + h + 0.15;
-      foam.positions[idx + 2] = zWorld;
-      foamCount++;
-    }
   }
   positions.needsUpdate = true;
   ground.geometry.computeVertexNormals();
@@ -838,6 +1145,8 @@ function dropNetToBottom() {
   netState.phase = "idle";
   netState.progress = 0;
   netState.currentTons = 0;
+  netState.catchSpecies = null;
+  sharkState.sprinting = false;
   netState.mesh.visible = true;
   netState.rope.visible = false;
   netState.mesh.position.set(
@@ -852,10 +1161,12 @@ function dropNetToBottom() {
 function startNet() {
   const anchorWorld = getNetAnchorPosition();
   netState.anchorPos.copy(anchorWorld);
+  netState.catchSpecies = getFishForPosition(anchorWorld.x, anchorWorld.z);
+  sharkState.sprinting = true;
   netState.targetPos.copy(anchorWorld);
   netState.targetPos.y = groundBaseHeight - 10;
   netState.progress = 0;
-  netState.targetTons = 9 + Math.random() * 6;
+  netState.targetTons = netState.catchSpecies ? 9 + Math.random() * 6 : 0;
   netState.maxTons = netState.targetTons;
   netState.currentTons = 0;
   netState.duration = 5 + Math.random() * 5;
@@ -939,6 +1250,12 @@ function finishNet() {
   netState.active = false;
   netState.phase = "idle";
   totalTons += netState.currentTons;
+  if (netState.catchSpecies && netState.currentTons > 0) {
+    speciesTotals[netState.catchSpecies.name] =
+      (speciesTotals[netState.catchSpecies.name] || 0) + netState.currentTons;
+    cargoTotals[netState.catchSpecies.name] =
+      (cargoTotals[netState.catchSpecies.name] || 0) + netState.currentTons;
+  }
   netState.currentTons = 0;
   netState.progress = 0;
   if (netState.mesh) netState.mesh.visible = false;
@@ -946,9 +1263,54 @@ function finishNet() {
   if (netBarTotal) netBarTotal.textContent = `(${totalTons.toFixed(1)} t total)`;
   setNetbarVisibility(false);
   updateStatusHaul(0, totalTons);
+  netState.catchSpecies = null;
+  sharkState.sprinting = false;
   if (!gameOver && totalTons >= 80) {
     triggerCapsize("overload");
   }
+}
+
+function markOpeningFinished() {
+  if (openingFinished) return;
+  openingFinished = true;
+  tryShowPendingFish();
+}
+
+function unloadAtMothership() {
+  if (!vehicle.object || !mothershipState.object) return;
+  const dist = vehicle.object.position.distanceTo(mothershipState.object.position);
+  if (dist > mothershipDockRange) {
+    console.log("Return to mothership to unload.");
+    return;
+  }
+  const cargo = getCargoWeight();
+  if (cargo <= 0.001) {
+    console.log("No cargo to unload.");
+    return;
+  }
+  const payout = computePayout();
+  cashTotal += payout;
+  const mainSpecies = Object.entries(cargoTotals).reduce(
+    (acc, [name, tons]) => (tons > acc.tons ? { name, tons } : acc),
+    { name: null, tons: 0 }
+  );
+  let haulSoundType = "wrong";
+  if (mainSpecies.name === targetFish?.name) {
+    haulSoundType = "success";
+  } else if (mainSpecies.name === "Ocean Perch" && mainSpecies.name !== "Snapper") {
+    haulSoundType = "oceanPerch";
+  }
+  targetFish = null;
+  refreshSectionOverlay();
+  resetCargoTotals();
+  totalTons = 0;
+  updateStatusHaul(0, totalTons);
+  if (netBarTotal) netBarTotal.textContent = `(0.0 t total)`;
+  console.log(`Unloaded ${cargo.toFixed(1)} t for $${payout.toFixed(2)}. Total cash: $${cashTotal.toFixed(2)}.`);
+  playHaulComplete(haulSoundType, () => {
+    setNewTargetFish();
+    refreshSectionOverlay();
+  });
 }
 
 function updateRope(anchorPos, netPos) {
@@ -1178,6 +1540,20 @@ function renderMinimap() {
 
   const range = minimapRange;
 
+  if (mothershipState.object) {
+    const dx = mothershipState.object.position.x - boatPos.x;
+    const dz = mothershipState.object.position.z - boatPos.z;
+    const dist = Math.hypot(dx, dz);
+    const capped = Math.min(dist, range);
+    const scale = radius / range;
+    const px = (dx / (dist || 1)) * capped * scale;
+    const pz = (dz / (dist || 1)) * capped * scale;
+    ctx.fillStyle = "#4ea5ff";
+    ctx.beginPath();
+    ctx.arc(px, pz, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   for (const wv of waves) {
     if (!wv.active) continue;
     const dx = wv.center.x - boatPos.x;
@@ -1320,11 +1696,61 @@ function applyGerstnerWaves(material) {
   };
 }
 
+function applyCalmWaves(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `
+      #include <common>
+      uniform float uTime;
+      `
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <beginnormal_vertex>",
+      `
+      vec3 displacedPos = vec3(position);
+      float k0 = 6.28318530718 / 80.0;
+      float k1 = 6.28318530718 / 120.0;
+      float k2 = 6.28318530718 / 60.0;
+      vec2 d0 = normalize(vec2(1.0, 0.3));
+      vec2 d1 = normalize(vec2(-0.6, 1.0));
+      vec2 d2 = normalize(vec2(0.2, -1.0));
+      float ph0 = k0 * (d0.x * position.x + d0.y * position.y) + 0.6 * uTime;
+      float ph1 = k1 * (d1.x * position.x + d1.y * position.y) + 0.5 * uTime;
+      float ph2 = k2 * (d2.x * position.x + d2.y * position.y) + 0.8 * uTime;
+      float h = 0.15 * sin(ph0) + 0.12 * sin(ph1) + 0.1 * sin(ph2);
+      displacedPos.z += h;
+      vec3 objectNormal = normalize(vec3(
+        - (0.15 * k0 * cos(ph0) * d0.x + 0.12 * k1 * cos(ph1) * d1.x + 0.1 * k2 * cos(ph2) * d2.x),
+        - (0.15 * k0 * cos(ph0) * d0.y + 0.12 * k1 * cos(ph1) * d1.y + 0.1 * k2 * cos(ph2) * d2.y),
+        1.0
+      ));
+      `
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `
+      vec3 transformed = displacedPos;
+      `
+    );
+    material.userData.calm = { uniforms: shader.uniforms };
+  };
+}
+
 function updateGerstnerTime(time) {
   const g = groundMaterial.userData.gerstner;
   if (g && g.uniforms) {
     g.uniforms.uTime.value = time;
   }
+}
+
+function updateCalmTime(time) {
+  calmMaterials.forEach((m) => {
+    if (m.userData.calm?.uniforms) {
+      m.userData.calm.uniforms.uTime.value = time;
+    }
+  });
 }
 
 function updateWaterMask() {
@@ -1366,7 +1792,10 @@ function lerpAngle(a, b, t) {
 
 function updateShark(dt) {
   if (!sharkState.object) return;
-  const chasing = netState.active && netState.phase !== "idle";
+  const chasing = (netState.active && netState.phase !== "idle") || sharkState.sprinting;
+  if (!netState.active && sharkState.sprinting) {
+    sharkState.sprinting = false;
+  }
   sharkState.wanderTimer -= dt;
   if (!chasing && sharkState.wanderTimer <= 0) {
     sharkState.wanderTimer = 3 + Math.random() * 3;
@@ -1384,15 +1813,12 @@ function updateShark(dt) {
       vehicle.object.position.x - pos.x,
       vehicle.object.position.z - pos.z
     );
-    sharkState.yaw = lerpAngle(sharkState.yaw, angleToBoat, dt * 2.0);
-    const chaseFactor = netState.progress;
-    const base = 8 + chaseFactor * 10;
+    sharkState.yaw = lerpAngle(sharkState.yaw, angleToBoat, dt * 3.5);
     const dist = pos.distanceTo(vehicle.object.position);
-    const sprint =
-      netState.active && dist < 72
-        ? THREE.MathUtils.lerp(3, 5, Math.random())
-        : 1;
-    sharkState.speed = base * sprint;
+    const sprinting = dist <= sharkNetChaseRadius;
+    const chaseFactor = netState.progress || 0;
+    const base = 10 + chaseFactor * 12;
+    sharkState.speed = sprinting ? sharkSprintSpeed : base;
   }
 
   const forward = tmpForward.set(Math.sin(sharkState.yaw), 0, Math.cos(sharkState.yaw));
@@ -1431,22 +1857,56 @@ function updateShark(dt) {
   }
 }
 
-function updateFoam(dt, time) {
-  if (!foam.geometry || !foam.positions || !foam.samples) return;
-  let count = 0;
-  for (let i = 0; i < foam.samples.length && count < foam.max; i++) {
-    const sample = foam.samples[i];
-    const g = sampleGerstner(sample.x, sample.y, time);
-    if (Math.abs(g.height) < foam.threshold) continue;
-    const idx = count * 3;
-    foam.positions[idx] = sample.x;
-    foam.positions[idx + 1] = groundBaseHeight + g.height + 0.05;
-    foam.positions[idx + 2] = sample.y;
-    count++;
-  }
-  foam.geometry.setDrawRange(0, count);
-  foam.geometry.attributes.position.needsUpdate = true;
+function updateMothership(dt) {
+  if (!mothershipState.object) return;
+  const pos = mothershipState.object.position;
+  const gInfo = getGroundInfo(pos.x, pos.z);
+  const gWave = sampleGerstner(pos.x, pos.z, shaderTime);
+  const targetY = groundBaseHeight + gInfo.height + gWave.height;
+  mothershipState.smoothY = THREE.MathUtils.damp(
+    mothershipState.smoothY || targetY,
+    targetY,
+    3,
+    dt
+  );
+  pos.y = mothershipState.smoothY;
+  mothershipState.object.rotation.y = mothershipState.yaw;
 }
+
+function updateSharkAlarm() {
+  if (!alarmSound || !alarmSound.buffer) return;
+  if (!alarmSound.isPlaying && alarmSound.buffer) {
+    alarmSound.setLoop(true);
+    alarmSound.play();
+  }
+  let volume = 0;
+  if (vehicle.object && sharkState.object) {
+    const dist = vehicle.object.position.distanceTo(sharkState.object.position);
+    if (dist <= 200) {
+      const t = THREE.MathUtils.clamp(1 - dist / 200, 0, 1);
+      volume = 0.1 + 0.9 * t;
+    } else if (dist <= 280) {
+      volume = 0.05;
+    }
+  }
+  alarmSound.setVolume(volume);
+}
+
+function randomEdgePosition() {
+  const half = groundSize * 0.5;
+  const side = Math.random() < 0.5 ? "x" : "z";
+  if (side === "x") {
+    const x = (Math.random() < 0.5 ? -half : half) * 0.95;
+    const z = (Math.random() - 0.5) * groundSize;
+    return new THREE.Vector3(x, groundBaseHeight, z);
+  } else {
+    const z = (Math.random() < 0.5 ? -half : half) * 0.95;
+    const x = (Math.random() - 0.5) * groundSize;
+    return new THREE.Vector3(x, groundBaseHeight, z);
+  }
+}
+
+// foam removed
 
 function updateStatusHaul(current, total) {
   if (!statusHaul) return;
