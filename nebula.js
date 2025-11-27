@@ -36,6 +36,7 @@ const haulSounds = {
   oceanPerch: new THREE.Audio(listener),
   wrong: new THREE.Audio(listener),
 };
+const mosaRoar = new THREE.PositionalAudio(listener);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 2, 0);
@@ -55,7 +56,18 @@ const normal = textureLoader.load("Water_Normal.jpg", (tex) => {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(100, 100);
 });
+const crestTex = textureLoader.load("Crest_Material.png", (tex) => {
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(10, 10);
+});
 const calmMaterials = [];
+const splashState = {
+  mesh: null,
+  particles: [],
+  poolSize: 20,
+  cooldown: 0,
+};
+const splashGravity = -18;
 
 const maxRogueWaves = 3;
 const waveConfig = {
@@ -100,6 +112,26 @@ const sharkState = {
 };
 const sharkNetChaseRadius = 220;
 const sharkSprintSpeed = 18;
+const mosasaurState = {
+  object: null,
+  mixer: null,
+  action: null,
+  yaw: 0,
+  modelYawOffset: -Math.PI / 2,
+  speed: 30,
+  active: false,
+  spawnTimer: 8,
+  phase: "hidden", // hidden | swim | jump | dive
+  jumpTimer: 0,
+  jumpDuration: 2.4,
+  jumpHeight: 30,
+  diveTimer: 0,
+  inScene: false,
+  waveRef: null,
+  boundsDepth: 10,
+  jumpVel: new THREE.Vector3(),
+  jumpGravity: -30,
+};
 
 const groundBaseHeight = -0.01;
 const groundSize = 2000;
@@ -118,6 +150,7 @@ ground.rotation.x = -Math.PI / 2;
 ground.position.y = groundBaseHeight;
 ground.receiveShadow = true;
 scene.add(ground);
+initSplashSystem();
 // surround center with calm wave tiles
 const calmGeometry = new THREE.PlaneGeometry(groundSize, groundSize, 100, 100);
 function makeCalmMaterial() {
@@ -161,6 +194,39 @@ new RGBELoader().load(
     console.error("Failed to load HDR:", err);
   }
 );
+
+function initSplashSystem() {
+  const geo = new THREE.SphereGeometry(0.15, 6, 6);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0xffffff,
+    emissiveIntensity: 0.9,
+    roughness: 0.2,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    depthTest: false,
+  });
+  splashState.mesh = new THREE.InstancedMesh(geo, mat, splashState.poolSize);
+  splashState.mesh.renderOrder = 999;
+  splashState.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  splashState.particles = Array.from({ length: splashState.poolSize }, () => ({
+    active: false,
+    pos: new THREE.Vector3(),
+    vel: new THREE.Vector3(),
+    life: 0,
+    ttl: 0,
+  }));
+  scene.add(splashState.mesh);
+  for (let i = 0; i < splashState.poolSize; i++) {
+    const m = new THREE.Matrix4();
+    m.makeScale(0, 0, 0);
+    splashState.mesh.setMatrixAt(i, m);
+  }
+  splashState.mesh.instanceMatrix.needsUpdate = true;
+}
 
 // load ambient wind
 audioLoader.load(
@@ -240,6 +306,16 @@ audioLoader.load(
   },
   undefined,
   (err) => console.warn("Failed to load alarm1.mp3", err)
+);
+audioLoader.load(
+  "mosaRoar.mp3",
+  (buffer) => {
+    mosaRoar.setBuffer(buffer);
+    mosaRoar.setLoop(false);
+    mosaRoar.setVolume(0);
+  },
+  undefined,
+  (err) => console.warn("Failed to load mosaRoar.mp3", err)
 );
 
 const controlModes = { CAR: "car", SPECTATOR: "spectator" };
@@ -415,6 +491,45 @@ gltfLoader.load(
   (err) => console.error("Failed to load shark.glb", err)
 );
 
+gltfLoader.load(
+  "mosasaurus.glb",
+  (gltf) => {
+    mosasaurState.object = gltf.scene;
+    mosasaurState.object.traverse((obj) => {
+      if (obj.isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    mosasaurState.object.scale.setScalar(1);
+    const box = new THREE.Box3().setFromObject(mosasaurState.object);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    mosasaurState.boundsDepth = size.z || mosasaurState.boundsDepth;
+    if (mosaRoar) {
+      mosasaurState.object.add(mosaRoar);
+      mosaRoar.setRefDistance(25);
+      mosaRoar.setMaxDistance(groundSize * 0.6);
+      mosaRoar.setDistanceModel("linear");
+    }
+    mosasaurState.yaw = 0;
+    mosasaurState.object.rotation.y = mosasaurState.yaw + mosasaurState.modelYawOffset;
+    mosasaurState.object.visible = false;
+    scene.add(mosasaurState.object);
+
+    mosasaurState.mixer = new THREE.AnimationMixer(gltf.scene);
+    mixers.push(mosasaurState.mixer);
+    if (gltf.animations.length > 0) {
+      mosasaurState.action = mosasaurState.mixer.clipAction(
+        gltf.animations.find((a) => a.name.toLowerCase().includes("swim")) || gltf.animations[0]
+      );
+      mosasaurState.action.play();
+    }
+  },
+  undefined,
+  (err) => console.error("Failed to load mosasaurus.glb", err)
+);
+
 const moveState = {
   forward: false,
   back: false,
@@ -438,6 +553,10 @@ const camLook = new THREE.Vector3();
 const tmpNetDir = new THREE.Vector3();
 const tmpNetMid = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
+const tmpMat4 = new THREE.Matrix4();
+const tmpVecA = new THREE.Vector3();
+const tmpQuatIdentity = new THREE.Quaternion();
+const tmpVecB = new THREE.Vector3();
 let lastTime = performance.now();
 let shaderTime = 0;
 const boatHeightDamp = 8;
@@ -532,6 +651,24 @@ function tryShowPendingFish() {
   if (!openingFinished || !pendingFish) return;
   showFishCatch(pendingFish);
   pendingFish = null;
+}
+
+function applyGrittyHudFont() {
+  const font = `"Impact","Haettenschweiler","Arial Black","Franklin Gothic Medium",sans-serif`;
+  document.body.style.fontFamily = font;
+  const hudElems = [
+    document.getElementById("hud"),
+    document.getElementById("status"),
+    document.getElementById("controls-panel"),
+    document.getElementById("netbar"),
+    document.getElementById("minimap"),
+  ];
+  hudElems.forEach((el) => {
+    if (el) {
+      el.style.fontFamily = font;
+      el.style.letterSpacing = "0.5px";
+    }
+  });
 }
 function playFishSound(fish) {
   const key = fish.sound;
@@ -679,6 +816,8 @@ if (isMobile) {
   setupTouchControls();
   statusHaul && (document.getElementById("status-hint").textContent = "Use joystick + buttons");
 }
+
+applyGrittyHudFont();
 
 controls.enabled = controlMode === controlModes.SPECTATOR;
 
@@ -955,6 +1094,54 @@ function handleResize() {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
+
+function randomMosaSpawn() {
+  return 5 + Math.random() * 235; // 5s to ~4 minutes
+}
+
+function respawnSharkAtEdge() {
+  if (!sharkState.object) return;
+  const pos = randomEdgePosition();
+  const water =
+    groundBaseHeight +
+    sampleWave(pos.x, pos.z).height +
+    sampleGerstner(pos.x, pos.z, shaderTime).height;
+  sharkState.object.visible = false;
+  sharkState.object.position.set(pos.x, water, pos.z);
+  sharkState.yaw = Math.random() * Math.PI * 2;
+  sharkState.object.rotation.y = sharkState.yaw + sharkState.modelYawOffset;
+  sharkState.sprinting = false;
+  sharkState.wanderTimer = 0;
+  sharkState.object.visible = true;
+}
+
+function handleMosaSharkOverlap() {
+  respawnSharkAtEdge();
+  resetMosasaur();
+  mosasaurState.spawnTimer = randomMosaSpawn();
+}
+
+function playMosaRoar(origin) {
+  if (!mosaRoar || !mosaRoar.buffer) return;
+  const boatPos = vehicle.object ? vehicle.object.position : camera.position;
+  const dist = origin.distanceTo(boatPos);
+  const maxRange = groundSize * 0.5;
+  const vol = THREE.MathUtils.clamp(1 - dist / maxRange, 0.01, 1);
+  mosaRoar.setVolume(vol);
+  mosaRoar.position.copy(origin);
+  if (!mosaRoar.parent && mosasaurState.object) {
+    mosasaurState.object.add(mosaRoar);
+  }
+  mosaRoar.setRefDistance(25);
+  mosaRoar.setMaxDistance(maxRange);
+  mosaRoar.setDistanceModel("linear");
+  if (!mosaRoar.isPlaying) {
+    mosaRoar.play();
+  } else {
+    mosaRoar.stop();
+    mosaRoar.play();
+  }
+}
 window.addEventListener("resize", handleResize);
 
 function animate() {
@@ -972,9 +1159,11 @@ function animate() {
 
   updateWave(dt);
   updateNet(dt);
+  updateSplash(dt);
   updateGerstnerTime(shaderTime);
   updateCalmTime(shaderTime);
   updateShark(dt);
+  updateMosasaur(dt);
   updateSharkAlarm();
   updateMothership(dt);
   mixers.forEach((m) => m.update(dt));
@@ -1073,6 +1262,7 @@ function updateWave(dt) {
     }
     moveWave(w, dt);
   }
+  triggerCrestSplash(dt);
   updateHud();
   updateWaveMesh();
   checkRogueCapsize();
@@ -1100,6 +1290,87 @@ function updateWaveMesh() {
   }
   positions.needsUpdate = true;
   ground.geometry.computeVertexNormals();
+}
+
+function triggerCrestSplash(dt) {
+  if (!vehicle.object && !camera) return;
+  if (splashState.cooldown > 0) splashState.cooldown -= dt;
+  if (splashState.cooldown > 0) return;
+  const origin = vehicle.object ? vehicle.object.position : camera.position;
+  const sampleRadius = 220;
+  let best = { wave: null, height: 0, pos: null };
+  for (let i = 0; i < 6; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const r = Math.random() * sampleRadius;
+    const px = origin.x + Math.cos(ang) * r;
+    const pz = origin.z + Math.sin(ang) * r;
+    for (const w of waves) {
+      if (!w.active) continue;
+      const s = sampleSingleWave(w, px, pz);
+      if (s.height > best.height) {
+        best.height = s.height;
+        best.wave = w;
+        best.pos = { x: px, z: pz };
+      }
+    }
+  }
+  if (best.wave && best.height > 0.35 && best.pos) {
+    const crestY =
+      groundBaseHeight +
+      sampleWave(best.pos.x, best.pos.z).height +
+      sampleGerstner(best.pos.x, best.pos.z, shaderTime).height +
+      0.9;
+    spawnSplashParticles(
+      new THREE.Vector3(best.pos.x, crestY, best.pos.z),
+      best.wave.dir
+    );
+    splashState.cooldown = 0.25;
+  }
+}
+
+function spawnSplashParticles(origin, waveDir) {
+  if (!splashState.mesh) return;
+  const dir3 = tmpVecA.set(waveDir.x, 0, waveDir.y).normalize();
+  const upBoost = 9;
+  for (let i = 0; i < splashState.poolSize; i++) {
+    const p = splashState.particles[i];
+    p.active = true;
+    p.life = 0;
+    p.ttl = 0.9 + Math.random() * 0.5;
+    p.pos.copy(origin);
+    p.pos.x += (Math.random() - 0.5) * 0.8;
+    p.pos.z += (Math.random() - 0.5) * 0.8;
+    p.vel.copy(dir3).multiplyScalar(5 + Math.random() * 6);
+    p.vel.y = upBoost + Math.random() * 3.5;
+    p.vel.x += (Math.random() - 0.5) * 1.2;
+    p.vel.z += (Math.random() - 0.5) * 1.2;
+  }
+  splashState.mesh.instanceMatrix.needsUpdate = true;
+}
+
+function updateSplash(dt) {
+  if (!splashState.mesh) return;
+  for (let i = 0; i < splashState.poolSize; i++) {
+    const p = splashState.particles[i];
+    if (!p.active) {
+      tmpMat4.makeScale(0, 0, 0);
+      splashState.mesh.setMatrixAt(i, tmpMat4);
+      continue;
+    }
+    p.life += dt;
+    if (p.life >= p.ttl) {
+      p.active = false;
+      tmpMat4.makeScale(0, 0, 0);
+      splashState.mesh.setMatrixAt(i, tmpMat4);
+      continue;
+    }
+    p.vel.y += splashGravity * dt;
+    p.pos.addScaledVector(p.vel, dt);
+    const scale = THREE.MathUtils.lerp(0.45, 0.1, p.life / p.ttl);
+    tmpMat4.compose(p.pos, tmpQuatIdentity, new THREE.Vector3(scale, scale, scale));
+    splashState.mesh.setMatrixAt(i, tmpMat4);
+  }
+  splashState.mesh.instanceMatrix.needsUpdate = true;
 }
 
 function updateHud() {
@@ -1602,6 +1873,10 @@ function applyGerstnerWaves(material) {
     shader.uniforms.uMaskRadius = { value: 18 };
     shader.uniforms.uMaskCenterBoat = { value: new THREE.Vector2(0, 0) };
     shader.uniforms.uMaskRadiusBoat = { value: 0 };
+    shader.uniforms.uTileSize = { value: 20.0 };
+    shader.uniforms.uBaseScale = { value: 1.0 };
+    shader.uniforms.uFoamMap = { value: crestTex };
+    shader.uniforms.uFoamScale = { value: 1.5 };
     shader.uniforms.uDir = { value: gerstnerWaves.map((w) => w.dir) };
     shader.uniforms.uWaves = {
       value: gerstnerWaves.map((w) => new THREE.Vector4(w.amp, w.len, w.speed, w.steep)),
@@ -1618,8 +1893,9 @@ function applyGerstnerWaves(material) {
       uniform vec2 uMaskCenterBoat;
       uniform float uMaskRadiusBoat;
       varying vec3 vWorldPos;
+      varying float vCrest;
 
-      void applyGerstner(vec3 pos, out vec3 displaced, out vec3 gNormal) {
+      void applyGerstner(vec3 pos, out vec3 displaced, out vec3 gNormal, out float crest) {
         vec3 disp = pos;
         float dHdx = 0.0;
         float dHdy = 0.0;
@@ -1645,6 +1921,7 @@ function applyGerstnerWaves(material) {
 
         displaced = disp;
         gNormal = normalize(vec3(-dHdx, -dHdy, 1.0));
+        crest = length(vec2(dHdx, dHdy)) * 2.0;
       }
       `
     );
@@ -1654,9 +1931,11 @@ function applyGerstnerWaves(material) {
         `
       vec3 displacedPos;
       vec3 gNormal;
-      applyGerstner(vec3(position), displacedPos, gNormal);
+      float crestFactor;
+      applyGerstner(vec3(position), displacedPos, gNormal, crestFactor);
       vec3 objectNormal = gNormal;
       vWorldPos = (modelMatrix * vec4(displacedPos, 1.0)).xyz;
+      vCrest = crestFactor;
       `
     );
 
@@ -1675,13 +1954,50 @@ function applyGerstnerWaves(material) {
       uniform float uMaskRadius;
       uniform vec2 uMaskCenterBoat;
       uniform float uMaskRadiusBoat;
+      uniform float uTileSize;
+      uniform float uBaseScale;
+      uniform sampler2D uFoamMap;
+      uniform float uFoamScale;
       varying vec3 vWorldPos;
+      varying float vCrest;
+
+      float hash11(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      vec2 rotateUV(vec2 uv, float angle) {
+        float s = sin(angle);
+        float c = cos(angle);
+        uv -= 0.5;
+        uv = mat2(c, -s, s, c) * uv;
+        uv += 0.5;
+        return uv;
+      }
+
+      vec2 tileUV(vec2 worldPos) {
+        vec2 cell = floor(worldPos / uTileSize);
+        vec2 local = fract(worldPos / uTileSize);
+        float r = hash11(cell);
+        float rot = r < 0.25 ? 0.0 : (r < 0.5 ? 1.5707963 : (r < 0.75 ? 3.1415926 : 4.71238898));
+        vec2 uv = rotateUV(local, rot);
+        return uv * uBaseScale;
+      }
       `
     );
 
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <dithering_fragment>",
-      `
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <dithering_fragment>",
+        `
+      {
+        vec2 foamUv = tileUV(vWorldPos.xz) * uFoamScale;
+        vec4 crestSample = texture2D(uFoamMap, foamUv);
+        float foamMask = crestSample.r;
+        float foam = smoothstep(0.12, 0.32, vCrest);
+        foam = pow(foam, 1.5) * foamMask;
+        vec3 crestTint = crestSample.rgb;
+        vec3 crestColor = mix(gl_FragColor.rgb * crestTint, vec3(1.0), 0.5);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, crestColor, foam);
+      }
       {
         float d = length(vWorldPos.xz - uMaskCenter);
         float alphaMaskShark = mix(0.7, 1.0, smoothstep(uMaskRadius * 0.4, uMaskRadius, d));
@@ -1693,6 +2009,18 @@ function applyGerstnerWaves(material) {
       #include <dithering_fragment>
       `
     );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <map_fragment>",
+      `
+      #ifdef USE_MAP
+        vec2 tiledUv = tileUV(vWorldPos.xz);
+        vec4 texelColor = texture2D(map, tiledUv);
+        diffuseColor *= texelColor;
+      #endif
+      `
+    );
+
   };
 }
 
@@ -1854,6 +2182,160 @@ function updateShark(dt) {
     if (Math.min(distSeg, distNet) < 3.0) {
       triggerCapsize("rogue");
     }
+  }
+
+  if (mosasaurState.object && mosasaurState.active) {
+    const overlapDist = pos.distanceTo(mosasaurState.object.position);
+    const overlapThresh = Math.max(mosasaurState.boundsDepth * 0.6, 20);
+    if (overlapDist < overlapThresh) {
+      handleMosaSharkOverlap();
+    }
+  }
+}
+
+function spawnMosasaur() {
+  if (!mosasaurState.object) return;
+  const pos = randomEdgePosition();
+  mosasaurState.object.position.copy(pos);
+  const targetPos = sharkState.object ? sharkState.object.position : new THREE.Vector3(0, 0, 0);
+  mosasaurState.yaw = Math.atan2(targetPos.x - pos.x, targetPos.z - pos.z);
+  mosasaurState.object.rotation.y = mosasaurState.yaw + mosasaurState.modelYawOffset;
+  if (!mosasaurState.inScene) {
+    scene.add(mosasaurState.object);
+    mosasaurState.inScene = true;
+  }
+  mosasaurState.object.visible = true;
+  mosasaurState.active = true;
+  mosasaurState.phase = "swim";
+  mosasaurState.jumpTimer = 0;
+  mosasaurState.diveTimer = 0;
+  mosasaurState.waveRef = null;
+  mosasaurState.jumpVel.set(0, 0, 0);
+  if (mosasaurState.action) {
+    mosasaurState.action.reset().play();
+  }
+}
+
+function spawnMosaWave(pos, dir) {
+  const slot =
+    waves.find((w) => !w.active) ||
+    waves.reduce((min, w) => (w.traveled > min.traveled ? w : min), waves[0]);
+  if (!slot) return;
+  slot.dir.copy(new THREE.Vector2(dir.x, dir.z).normalize());
+  const forwardOffset = mosasaurState.boundsDepth * 0.25;
+  slot.center.set(pos.x + slot.dir.x * forwardOffset, pos.z + slot.dir.y * forwardOffset);
+  slot.amplitude = waveConfig.ampMax * 0.9;
+  slot.speed = 0;
+  slot.traveled = 0;
+  slot.sigmaAlong = waveConfig.sigmaAlong;
+  slot.sigmaAcross = waveConfig.sigmaAcross;
+  slot.active = true;
+  slot.cooldown = 0;
+  mosasaurState.waveRef = slot;
+}
+
+function sinkMosaWave() {
+  if (mosasaurState.waveRef) {
+    mosasaurState.waveRef.active = false;
+    mosasaurState.waveRef.cooldown = 2;
+    mosasaurState.waveRef = null;
+  }
+}
+
+function resetMosasaur() {
+  mosasaurState.active = false;
+  mosasaurState.phase = "hidden";
+  mosasaurState.spawnTimer = randomMosaSpawn();
+  mosasaurState.object.visible = false;
+  if (mosasaurState.inScene) {
+    scene.remove(mosasaurState.object);
+    mosasaurState.inScene = false;
+  }
+  mosasaurState.waveRef = null;
+  mosasaurState.jumpVel.set(0, 0, 0);
+}
+
+function updateMosasaur(dt) {
+  if (!mosasaurState.object) return;
+  if (!mosasaurState.active) {
+    mosasaurState.spawnTimer -= dt;
+    if (mosasaurState.spawnTimer <= 0) {
+      mosasaurState.spawnTimer = randomMosaSpawn();
+      spawnMosasaur();
+    }
+    return;
+  }
+  if (mosasaurState.phase !== "hidden" && sharkState.object) {
+    const overlapDist = mosasaurState.object.position.distanceTo(sharkState.object.position);
+    const overlapThresh = Math.max(mosasaurState.boundsDepth * 0.6, 20);
+    if (overlapDist < overlapThresh) {
+      handleMosaSharkOverlap();
+      return;
+    }
+  }
+  const pos = mosasaurState.object.position;
+  if (mosasaurState.phase === "swim") {
+    const targetPos = sharkState.object ? sharkState.object.position : new THREE.Vector3(0, 0, 0);
+  const desiredYaw = Math.atan2(targetPos.x - pos.x, targetPos.z - pos.z);
+  mosasaurState.yaw = desiredYaw;
+  mosasaurState.object.rotation.y = mosasaurState.yaw + mosasaurState.modelYawOffset;
+}
+
+tmpForward.set(Math.sin(mosasaurState.yaw), 0, Math.cos(mosasaurState.yaw));
+mosasaurState.speed = waveConfig.speedMax;
+pos.addScaledVector(tmpForward, mosasaurState.speed * dt);
+
+  const waterHeight =
+    groundBaseHeight +
+    sampleWave(pos.x, pos.z).height +
+    sampleGerstner(pos.x, pos.z, shaderTime).height;
+
+  switch (mosasaurState.phase) {
+    case "swim": {
+      pos.y = THREE.MathUtils.damp(pos.y, waterHeight, 3, dt);
+      if (mosasaurState.waveRef) {
+        const forwardOffset = mosasaurState.boundsDepth * 0.25;
+        mosasaurState.waveRef.center.set(
+          pos.x + tmpForward.x * forwardOffset,
+          pos.z + tmpForward.z * forwardOffset
+        );
+        mosasaurState.waveRef.speed = 0;
+        mosasaurState.waveRef.active = true;
+      }
+      const dist = sharkState.object ? pos.distanceTo(sharkState.object.position) : 0;
+      if (dist < 150) {
+        spawnMosaWave(pos, tmpForward);
+        mosasaurState.phase = "jump";
+        mosasaurState.jumpTimer = 0;
+        mosasaurState.jumpVel
+          .copy(tmpForward)
+          .multiplyScalar(mosasaurState.speed * 1.2)
+          .add(new THREE.Vector3(0, 45, 0));
+        playMosaRoar(pos);
+        sinkMosaWave();
+      }
+      break;
+    }
+    case "jump": {
+      mosasaurState.jumpTimer += dt;
+      mosasaurState.jumpVel.y += mosasaurState.jumpGravity * dt;
+      pos.addScaledVector(mosasaurState.jumpVel, dt);
+      if (pos.y <= waterHeight && mosasaurState.jumpTimer > 0.6) {
+        mosasaurState.phase = "dive";
+        mosasaurState.diveTimer = 0;
+      }
+      break;
+    }
+    case "dive": {
+      mosasaurState.diveTimer += dt;
+      pos.y = THREE.MathUtils.damp(pos.y, waterHeight - 16, 2.5, dt);
+      if (mosasaurState.diveTimer >= 1.2) {
+        resetMosasaur();
+      }
+      break;
+    }
+    default:
+      break;
   }
 }
 
